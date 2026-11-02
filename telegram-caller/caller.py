@@ -22,7 +22,7 @@ import shutil
 import time
 import wave
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -68,7 +68,9 @@ STORAGE_LIMIT_MB = int(os.environ.get("STORAGE_LIMIT_MB", "1024"))
 OUTBOX_DIR = Path(os.environ.get("OUTBOX_DIR", "/var/spool/telegram-assistant"))
 # Projects that turned on automatic updates (update.sh --install); /update runs them now.
 UPDATES_DIR = Path(os.environ.get("UPDATES_DIR", "/etc/claude-updates.d"))
-COMMAND = re.compile(r"^(/call|call me|زنگ بزن|/text|/update)\b\s*(.*)$", re.I | re.S)
+COMMAND = re.compile(r"^(/call|call me|زنگ بزن|/text|/update|/new)(?:\s+(.*))?$", re.I | re.S)
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+MAX_VOICE_SECONDS = 300
 
 RATE = 48000                      # call audio: 16-bit mono PCM at 48 kHz
 FRAME_BYTES = RATE * 2 // 100     # 10 ms
@@ -97,6 +99,23 @@ JARVIS_PROMPT = (
 )
 if PERSONA == "jarvis":
     PHONE_PROMPT += JARVIS_PROMPT
+
+CHAT_PROMPT = (
+    f"You are {OWNER_NAME or 'the user'}'s personal AI assistant in a private Telegram chat. "
+    "Reply in the user's language. Be helpful and concise; use plain text. Voice notes arrive "
+    "as transcripts and may contain small mistakes. You can search and read with the available "
+    "tools, but cannot send, edit, delete, schedule messages or run server commands. Never "
+    "claim to have done those things; direct the user to the Claude app or the explicit "
+    "/call, /text and /update commands."
+) + (JARVIS_PROMPT if PERSONA == "jarvis" else "")
+
+
+def time_context() -> str:
+    now = datetime.now(timezone.utc)
+    return (f"Current date and time: {now.astimezone(TZ).isoformat(timespec='seconds')} "
+            f"({TZ.key}, user's configured timezone). UTC: {now.isoformat(timespec='seconds')}. "
+            "Use the configured timezone for relative dates unless the user specifies another. "
+            "The server operating-system timezone is not known from this setting.")
 
 
 def greeting() -> tuple[str, bool]:
@@ -223,12 +242,16 @@ def to_wav(pcm: bytes) -> bytes:
 
 
 async def transcribe(pcm: bytes) -> str:
+    return await transcribe_audio(to_wav(pcm), "speech.wav", "audio/wav")
+
+
+async def transcribe_audio(data: bytes, filename: str, mime: str) -> str:
     if not TRANSCRIBE_API_KEY:
         raise RuntimeError("TRANSCRIBE_API_KEY is missing in .env")
     async with httpx.AsyncClient(timeout=60) as http:
         r = await http.post(TRANSCRIBE_URL, data={"model": TRANSCRIBE_MODEL},
                             headers={"Authorization": f"Bearer {TRANSCRIBE_API_KEY}"},
-                            files={"file": ("speech.wav", to_wav(pcm), "audio/wav")})
+                            files={"file": (filename, data, mime)})
     if r.status_code >= 400:
         raise RuntimeError(f"speech-to-text error {r.status_code}: {r.text[:200]}")
     return (r.json().get("text") or "").strip()
@@ -249,13 +272,14 @@ def split_sentences(buf: str) -> tuple[list[str], str]:
 
 
 async def think(text: str, session_id: str | None,
-                sentences: asyncio.Queue | None = None) -> tuple[str, str | None]:
+                sentences: asyncio.Queue | None = None, *,
+                chat: bool = False) -> tuple[str, str | None]:
     """Ask Claude Code for the answer. Each sentence goes into `sentences` as soon as
     Claude has written it, so speaking can start early. Returns (whole reply, session id
     for the next turn)."""
     args = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages", "--settings", '{"alwaysThinkingEnabled": false}',
-            "--append-system-prompt", PHONE_PROMPT]
+            "--append-system-prompt", (CHAT_PROMPT if chat else PHONE_PROMPT) + "\n" + time_context()]
     if session_id:
         args += ["--resume", session_id]
     if CLAUDE_MODEL:
@@ -304,15 +328,22 @@ async def think(text: str, session_id: str | None,
                 emit([buf])  # e.g. "Let me check, sir." before a web search
                 buf = ""
 
+    # Drain stderr concurrently so a verbose subprocess cannot block on a full pipe.
+    stderr_task = asyncio.create_task(proc.stderr.read())
     try:
         await asyncio.wait_for(read(), CLAUDE_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError("Claude took too long")
-    await proc.wait()
+        await asyncio.wait_for(proc.wait(), 10)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        await stderr_task
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise RuntimeError("Claude took too long") from exc
     emit([buf])
+    err = (await stderr_task).decode(errors="replace")[:300]
     if result is None or result.get("is_error"):
-        err = (await proc.stderr.read()).decode()[:300]
         raise RuntimeError(f"Claude failed: {(result or {}).get('result') or err}")
     return (result.get("result") or full).strip(), session_id
 
@@ -504,6 +535,9 @@ class Assistant:
         self.calls = PyTgCalls(self.client)
         self.owner_id: int | None = None
         self.call: Call | None = None
+        self.chat_session_id: str | None = None
+        self.chat_lock = asyncio.Lock()
+        self.chat_pending = 0
 
     async def run(self):
         if not OWNER:
@@ -529,12 +563,13 @@ class Assistant:
         await self.client.run_until_disconnected()
 
     async def on_message(self, event):
-        if event.sender_id != self.owner_id:
+        if event.sender_id != self.owner_id or not event.is_private:
             return
         m = COMMAND.match((event.raw_text or "").strip())
         if not m:
+            await self.chat_message(event)
             return
-        command, rest = m.group(1).lower(), m.group(2).strip()
+        command, rest = m.group(1).lower(), (m.group(2) or "").strip()
         if command == "/text":
             # Claude asked this account to message the owner: say it, then tidy the command away.
             if rest:
@@ -542,11 +577,67 @@ class Assistant:
             await self.delete_quietly(event)
         elif command == "/update":
             await self.start_updates(event)
+        elif command == "/new":
+            await self.chat_message(event, reset=True)
         elif self.call:
             await event.reply("I'm already on a call with you.")
         else:
             await self.delete_quietly(event)
             asyncio.create_task(self.place_call(rest))
+
+    async def send_chat_text(self, event, text):
+        # 2,000 code points also fit Telegram's 4,096 UTF-16-unit limit with emoji.
+        for start in range(0, len(text), 2000):
+            await event.reply(text[start:start + 2000], parse_mode=None, link_preview=False)
+
+    async def chat_message(self, event, *, reset=False):
+        if self.chat_pending >= 10:
+            await event.reply("I have several messages waiting. Please try again shortly.")
+            return
+        self.chat_pending += 1
+        try:
+            # Serialize transcription, model turns and resets to preserve conversation order.
+            async with self.chat_lock:
+                if reset:
+                    self.chat_session_id = None
+                    await event.reply("Started a new conversation. Call conversations are separate.")
+                    return
+                text = (event.raw_text or "").strip()
+                if text.startswith("/"):
+                    await event.reply("Commands: /call, /text <message>, /update, /new. "
+                                      "You can also send a message or voice note.")
+                    return
+                async with self.client.action(self.owner_id, "typing"):
+                    if event.voice:
+                        document = event.message.document
+                        duration = max((getattr(a, "duration", 0) for a in document.attributes), default=0)
+                        if document.size > MAX_VOICE_BYTES or duration > MAX_VOICE_SECONDS:
+                            await event.reply("Please send a voice note under 5 minutes and 20 MB.")
+                            return
+                        data = await asyncio.wait_for(event.download_media(file=bytes), 60)
+                        if not data or len(data) > MAX_VOICE_BYTES:
+                            await event.reply("I couldn't read that voice note. Please send a shorter one.")
+                            return
+                        text = await transcribe_audio(data, "voice.ogg", "audio/ogg")
+                        if not text:
+                            await event.reply("I couldn't hear any words. Please try again or type your message.")
+                            return
+                        await self.send_chat_text(event, "Transcript:\n" + text)
+                    elif not text:
+                        await event.reply("Please send a text message or a voice note.")
+                        return
+                    reply, session = await think(text, self.chat_session_id, chat=True)
+                    if not reply:
+                        raise RuntimeError("Claude returned an empty reply")
+                    self.chat_session_id = session
+                    await self.send_chat_text(event, reply)
+        except Exception:
+            log.exception("chat reply failed")
+            await event.reply("Sorry, I couldn't answer just now. Please try again. "
+                              "If it keeps happening, check Claude's login or usage limit; "
+                              "use /new to start a fresh conversation.")
+        finally:
+            self.chat_pending -= 1
 
     async def delete_quietly(self, event):
         try:

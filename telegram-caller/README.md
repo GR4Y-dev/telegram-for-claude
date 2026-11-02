@@ -23,6 +23,19 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | `/call` (or `call me`, `زنگ بزن`), optionally followed by what to say | Calls you |
 | `/text <message>` | Texts you the message from this account (Claude's `text_me` uses it) |
 | `/update` | Updates every project on the server that has automatic updates on, and texts you the result |
+| Any text message | Replies as text, with a typing indicator and conversation memory |
+| A voice note | Sends a transcript, then a text answer (up to 5 minutes / 20 MB) |
+| `/new` | Starts a fresh text conversation; does not reset a call |
+
+Text and voice notes share one conversation while the service is running. A service restart
+starts a new chat; previous Claude session files remain subject to the storage limit. Messages
+are processed in order, including `/new`. Calls have separate conversations. Only private
+messages from the configured owner are accepted; group messages are ignored.
+
+Every chat and call turn includes the current time in `TIMEZONE` and UTC. Set `TIMEZONE` to
+`Europe/Istanbul` for Istanbul time; the assistant does not assume the server OS uses that zone.
+Replies use the existing Claude Code login and voice notes use the existing transcription key.
+Claude login or usage-limit problems produce a retry message. No new keys are required.
 
 ## Everyday commands
 

@@ -161,7 +161,7 @@ async def main():
     async def fake_place(msg): placed.append(msg)
     a.place_call = fake_place
     async def message(sender, text):
-        ev = SimpleNamespace(sender_id=sender, raw_text=text, replies=[], deleted=False)
+        ev = SimpleNamespace(sender_id=sender, raw_text=text, replies=[], deleted=False, is_private=True)
         async def reply(t): ev.replies.append(t)
         async def delete(): ev.deleted = True
         ev.reply, ev.delete = reply, delete
