@@ -32,6 +32,8 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 
 **Call assistant**
 - Answers your calls and calls you back; ignores everyone else
+- Chats by text with a typing indicator and conversation memory; `/new` starts fresh
+- Transcribes voice notes and replies in text; chats and calls know the current local and UTC time
 - Turn-based talk: speech-to-text → Claude Code → speech, with a soft tick while it thinks
 - Starts speaking Claude's first sentence while the rest is still being written
 - Can search the web and read your Telegram during a call (never send)
