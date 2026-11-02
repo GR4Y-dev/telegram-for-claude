@@ -64,6 +64,11 @@ QUIET_HANGUP_SECONDS = int(os.environ.get("QUIET_HANGUP_SECONDS", "90"))
 MAX_CALL_MINUTES = int(os.environ.get("MAX_CALL_MINUTES", "30"))
 # Most disk space the saved call conversations may use; the oldest go first. 0 = no limit.
 STORAGE_LIMIT_MB = int(os.environ.get("STORAGE_LIMIT_MB", "1024"))
+# Text files dropped here are sent to the owner as messages (update results, server scripts).
+OUTBOX_DIR = Path(os.environ.get("OUTBOX_DIR", "/var/spool/telegram-assistant"))
+# Projects that turned on automatic updates (update.sh --install); /update runs them now.
+UPDATES_DIR = Path(os.environ.get("UPDATES_DIR", "/etc/claude-updates.d"))
+COMMAND = re.compile(r"^(/call|call me|زنگ بزن|/text|/update)\b\s*(.*)$", re.I | re.S)
 
 RATE = 48000                      # call audio: 16-bit mono PCM at 48 kHz
 FRAME_BYTES = RATE * 2 // 100     # 10 ms
@@ -519,20 +524,83 @@ class Assistant:
         self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))(self.on_audio)
         await self.calls.start()
         trim_storage()
+        asyncio.create_task(self.watch_outbox())
         log.info("ready for calls")
         await self.client.run_until_disconnected()
 
     async def on_message(self, event):
         if event.sender_id != self.owner_id:
             return
-        text = (event.raw_text or "").strip()
-        m = re.match(r"^(/call|call me|زنگ بزن)\b\s*(.*)$", text, re.I | re.S)
+        m = COMMAND.match((event.raw_text or "").strip())
         if not m:
             return
-        if self.call:
+        command, rest = m.group(1).lower(), m.group(2).strip()
+        if command == "/text":
+            # Claude asked this account to message the owner: say it, then tidy the command away.
+            if rest:
+                await self.client.send_message(self.owner_id, rest)
+            await self.delete_quietly(event)
+        elif command == "/update":
+            await self.start_updates(event)
+        elif self.call:
             await event.reply("I'm already on a call with you.")
+        else:
+            await self.delete_quietly(event)
+            asyncio.create_task(self.place_call(rest))
+
+    async def delete_quietly(self, event):
+        try:
+            await event.delete()
+        except Exception:
+            pass
+
+    async def start_updates(self, event):
+        """Run every project's update.sh now, each in its own systemd unit so restarting
+        this assistant can't stop it. The results come back through the outbox."""
+        if self.call:
+            await event.reply("We're on a call. Send /update again after it.")
             return
-        asyncio.create_task(self.place_call(m.group(2).strip()))
+        projects = sorted(p for p in UPDATES_DIR.glob("*") if p.is_file()) if UPDATES_DIR.exists() else []
+        if not projects:
+            await event.reply("Automatic updates aren't set up on the server yet "
+                              "(run: bash update.sh --install in each project folder).")
+            return
+        started = []
+        for p in projects:
+            lines = p.read_text().strip().splitlines()   # its folder, then its name
+            root, title = lines[0], (lines[1] if len(lines) > 1 else p.name)
+            proc = await asyncio.create_subprocess_exec(
+                "systemd-run", "--no-block", "--collect", "--quiet", "--setenv=REPORT=1",
+                f"--unit={p.name}-update-now-{int(time.time())}", "/bin/bash", f"{root}/update.sh",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode == 0:
+                started.append(title)
+            else:
+                log.warning("couldn't start the update of %s: %s", p.name, err.decode().strip())
+        if started:
+            await event.reply(f"🔄 Checking for updates: {', '.join(started)}. I'll text you the result.")
+        else:
+            await event.reply("⚠️ Couldn't start the updates. Details are in the server log.")
+
+    async def watch_outbox(self):
+        """Text the owner whatever lands in the outbox: update results, messages from scripts."""
+        try:
+            OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("no outbox (%s): server scripts can't text you", e)
+            return
+        while True:
+            for f in sorted(OUTBOX_DIR.glob("*.txt")):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace").strip()
+                    if text:
+                        await self.client.send_message(self.owner_id, text[:4000])
+                    f.unlink()
+                except Exception as e:
+                    log.warning("couldn't send %s: %s", f.name, e)
+                    break  # try again next round
+            await asyncio.sleep(3)
 
     async def place_call(self, message: str):
         chat_id = self.owner_id

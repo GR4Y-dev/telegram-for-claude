@@ -19,14 +19,15 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 
 ## Features
 
-**Connector (16 tools)**
+**Connector (18 tools)**
 - Read chats, also far back by date, and search across all of them (without marking them as read)
 - Open attachments: photos and screenshots, PDFs (scanned ones too), Word, Excel, text and code files
 - Write out voice messages, round videos and audio (Persian, English, Turkish and more)
 - Profiles: bio, birthday, last seen, profile picture
 - Send messages and files (from a link, written by Claude, or from another chat), now or **scheduled**
 - Edit your own messages, forward, delete, mark as read
-- `call_me`: ask the call assistant to ring you, now or at a set time
+- `call_me` / `text_me`: your assistant rings you or texts you from its own account, now or later
+- `update_server`: "update the server" updates everything right away
 - Safety: confirmation before every change, 30 sends per hour, no profile, contact or group changes
 
 **Call assistant**
@@ -36,6 +37,13 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 - Can search the web and read your Telegram during a call (never send)
 - Voices: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) on your server for English,
   Microsoft's free neural voices for Persian
+- Texts you too: reminders from Claude, update results, and anything a script on your server
+  drops in its outbox
+
+**Updates without logging in to the server**
+- Every night the server updates itself, but only to versions whose tests passed on GitHub
+- Send `/update` to your assistant (or ask Claude "update the server") to update right away
+- The result comes as a text from your assistant
 
 **Hear it:** Jarvis ([Lewis](docs/samples/jarvis-lewis.mp3), [George](docs/samples/jarvis-george.mp3),
 [Daniel](docs/samples/jarvis-daniel.mp3), [Fable](docs/samples/jarvis-fable.mp3)) ·
@@ -151,21 +159,34 @@ second account's phone number and code). When it says **All set!**:
 
 On a call: talk, pause for a second, wait through the ticks. Say "bye" / "خداحافظ" to end.
 
-### 3. Let Claude see `call_me`
+### 3. Let Claude see the new tools
 
-In the Claude app, switch the Telegram connector off and on once so it picks up the new tool.
+claude.ai remembers a connector's list of tools. To pick up `call_me`, `text_me` and
+`update_server`, remove the Telegram connector in **Settings → Connectors** and add it again with
+the same address (print it again with `bash setup.sh` in `telegram-connector`).
 
 ---
 
 ## Updating
 
-```bash
-cd /opt/telegram-for-claude && git pull
-cd telegram-connector && docker compose up -d --build
-cd ../telegram-caller && bash setup.sh
-```
+You don't need to log in to the server for updates:
 
-Your settings and logins are kept.
+- **Automatically:** the setup asks "Update automatically every night?". If you said yes, the
+  server checks GitHub around 04:00 (server time) and installs a new version only if its tests
+  passed. Turn it on or off later with `bash update.sh --install` / `bash update.sh --uninstall`.
+- **Right now:** send `/update` to your assistant's account, or ask Claude "update the server".
+- **Either way,** your assistant texts you the result: what changed, or why it didn't update.
+
+By hand, on the server: `cd /opt/telegram-for-claude && bash update.sh` (or after a manual
+`git pull`, `bash update.sh --now`). Your settings and logins are always kept.
+
+## Messages from your assistant
+
+- Ask Claude "text me tomorrow at 8: bring the passport" and your assistant's account texts you
+  then (`text_me`). "Call me at 8" rings instead (`call_me`).
+- Scripts on your server can text you too: anything written to a `.txt` file in
+  `/var/spool/telegram-assistant/` is sent to you within a few seconds, then deleted.
+  For example: `echo "Backup finished" > /var/spool/telegram-assistant/backup.txt`
 
 ## Troubleshooting
 

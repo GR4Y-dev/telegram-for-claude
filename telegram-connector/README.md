@@ -18,7 +18,7 @@ schedules, edits, forwards or deletes anything.
 | Restart | `docker compose restart` |
 | Turn it off / on again | `docker compose stop` / `docker compose start` |
 | Log in to Telegram again | `docker compose run --rm --no-deps telegram python login.py` then `docker compose restart` |
-| Update to a new version | unzip the new version over this folder, then `docker compose up -d --build` |
+| Update now | ask Claude "update the server", or on the server `bash ../update.sh` |
 
 **To cut Claude off instantly:** in Telegram, go to **Settings → Devices** and end the session called
 "Claude connector". You can also remove the connector in claude.ai settings.

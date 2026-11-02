@@ -147,3 +147,9 @@ echo
 echo "All set! The assistant is $CALLER."
 echo " - Call it on Telegram from your main account, or"
 echo " - send it a message:  /call   (or ask Claude: \"call me\")"
+echo " - send it /update to update the server now"
+if [ -f ../update.sh ] && [ ! -f "/etc/systemd/system/$(basename "$(cd .. && pwd)")-update.timer" ]; then
+  echo
+  read -rp "Update automatically every night (only versions whose tests passed)? (Y/n): " ok
+  if [ "$ok" != "n" ] && [ "$ok" != "N" ]; then bash ../update.sh --install; fi
+fi

@@ -525,8 +525,8 @@ mcp = FastMCP(
         "not name. Only open attachments the user asked about. Reading chats with these "
         "tools does not mark them as read; mark_read does, and only when the user asks. "
         "Times (schedule_at, since, until) are the user's local time; whoami tells the "
-        "current local time. call_me only ever calls the user themself, so when they ask "
-        "to be called, just do it."
+        "current local time. call_me and text_me only ever reach the user themself, so "
+        "when they ask to be called or texted by their assistant, just do it."
     ),
     host="0.0.0.0",
     port=PORT,
@@ -997,6 +997,32 @@ async def call_me(message: str | None = None, schedule_at: str | None = None) ->
     Use it when the user asks to be called, now or later (schedule_at, like send_message,
     e.g. a wake-up call or a reminder). It only ever calls the user themself.
     If they don't pick up, the message reaches them as text instead."""
+    out = {"calling": not schedule_at, "message": (message or "").strip()}
+    return out | await _tell_assistant("/call", message, schedule_at)
+
+
+@mcp.tool(annotations=WRITE)
+async def text_me(message: str, schedule_at: str | None = None) -> dict:
+    """Send the user a Telegram message FROM THEIR AI ASSISTANT's account (the second account
+    that also calls them), now or later (schedule_at, like send_message). Use it for reminders,
+    notes and alerts the user asked to get from their assistant. It only ever texts the user
+    themself, so when they ask for it, just do it."""
+    if not (message or "").strip():
+        raise ValueError("The message is empty.")
+    out = {"texting": not schedule_at, "message": message.strip()}
+    return out | await _tell_assistant("/text", message, schedule_at)
+
+
+@mcp.tool(annotations=WRITE)
+async def update_server() -> dict:
+    """Update the user's server now: the assistant account runs the update of every project that
+    has automatic updates turned on (only versions whose tests passed on GitHub), and texts the
+    user the result. Use it when the user asks to update the server or the connectors."""
+    return {"updating": True} | await _tell_assistant("/update", None, None)
+
+
+async def _tell_assistant(command: str, message: str | None, schedule_at: str | None) -> dict:
+    """Send a command to the call assistant's account from the user's account."""
     if not CALLER:
         raise ValueError("The call assistant isn't set up yet: CALLER is missing in the "
                          "connector's .env (telegram-caller's setup.sh adds it).")
@@ -1004,17 +1030,16 @@ async def call_me(message: str | None = None, schedule_at: str | None = None) ->
     _check_send_limit()
     client = await tg()
     target = await resolve_chat(client, CALLER)
-    text = f"/call {(message or '').strip()}".strip()
+    text = f"{command} {(message or '').strip()}".strip()
+    if len(text) > 4096:
+        raise ValueError("That's too long for one message: at most about 4000 characters.")
     try:
         sent = await client.send_message(target, text, schedule=when)
     except FloodWaitError as e:
         raise _slow_down(e)
     _record_sends()
-    log.info("%s a call", "scheduled" if when else "asked for")
-    out = {"calling": not when, "message": (message or "").strip()}
-    if when:
-        out["scheduled_for"] = _when(sent.date)
-    return out
+    log.info("%s %s", "scheduled" if when else "sent", command)
+    return {"scheduled_for": _when(sent.date)} if when else {}
 
 
 @mcp.tool(annotations=WRITE)

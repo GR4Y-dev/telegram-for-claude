@@ -151,6 +151,65 @@ async def main():
     check(calls.sent > caller.RATE * 2 * 3 and call.session_id == "s1",
           f"full call: greeting, answer, goodbye ({calls.sent / caller.RATE / 2:.1f}s of audio)")
 
+    # messages and commands from the owner
+    from types import SimpleNamespace
+    sent, placed = [], []
+    class FakeClient:
+        async def send_message(self, to, text): sent.append((to, text))
+    a = object.__new__(caller.Assistant)
+    a.client, a.owner_id, a.call = FakeClient(), 7, None
+    async def fake_place(msg): placed.append(msg)
+    a.place_call = fake_place
+    async def message(sender, text):
+        ev = SimpleNamespace(sender_id=sender, raw_text=text, replies=[], deleted=False)
+        async def reply(t): ev.replies.append(t)
+        async def delete(): ev.deleted = True
+        ev.reply, ev.delete = reply, delete
+        await a.on_message(ev); await asyncio.sleep(0)
+        return ev
+    ev = await message(7, "/text Remember the exam at 9")
+    check(sent == [(7, "Remember the exam at 9")] and ev.deleted, "/text: the assistant texts you, the command is tidied away")
+    ev = await message(7, "/call wake up")
+    check(placed == ["wake up"] and ev.deleted, "/call still calls you")
+    await message(99, "/text hacked"); await message(99, "/update")
+    check(len(sent) == 1, "nobody else can make it text or update")
+    with tempfile.TemporaryDirectory() as tmp:
+        caller.UPDATES_DIR = Path(tmp) / "updates"
+        ev = await message(7, "/update")
+        check("aren't set up" in ev.replies[0], "/update explains when updates aren't set up")
+        caller.UPDATES_DIR.mkdir()
+        (caller.UPDATES_DIR / "telegram-for-claude").write_text("/opt/telegram-for-claude\nTelegram for Claude\n")
+        (caller.UPDATES_DIR / "whatsapp-for-claude").write_text("/opt/whatsapp-for-claude\nWhatsApp for Claude\n")
+        runs = []
+        real_exec = asyncio.create_subprocess_exec
+        async def fake_exec(*args, **kw):
+            runs.append(args)
+            async def communicate(): return b"", b""
+            return SimpleNamespace(communicate=communicate, returncode=0)
+        asyncio.create_subprocess_exec = fake_exec
+        try:
+            ev = await message(7, "/update")
+        finally:
+            asyncio.create_subprocess_exec = real_exec
+        check(len(runs) == 2 and runs[0][0] == "systemd-run" and "--setenv=REPORT=1" in runs[0]
+              and runs[0][-1] == "/opt/telegram-for-claude/update.sh",
+              "/update runs each project's update.sh in its own systemd unit")
+        check("Telegram for Claude, WhatsApp for Claude" in ev.replies[0], f"/update says what it's checking: {ev.replies[0]}")
+        a.call = object(); ev = await message(7, "/update"); a.call = None
+        check("after it" in ev.replies[0], "/update waits while you're on a call")
+
+        # the outbox: files from server scripts become texts
+        caller.OUTBOX_DIR = Path(tmp) / "outbox"
+        caller.OUTBOX_DIR.mkdir()
+        (caller.OUTBOX_DIR / "1-a.txt").write_text("✅ Telegram for Claude updated", encoding="utf-8")
+        (caller.OUTBOX_DIR / "2-b.txt").write_text("⚠️ second", encoding="utf-8")
+        (caller.OUTBOX_DIR / ".hidden").write_text("not me")
+        sent.clear()
+        task = asyncio.create_task(a.watch_outbox()); await asyncio.sleep(0.3); task.cancel()
+        check(sent == [(7, "✅ Telegram for Claude updated"), (7, "⚠️ second")]
+              and sorted(p.name for p in caller.OUTBOX_DIR.iterdir()) == [".hidden"],
+              "outbox files are texted in order, then removed")
+
     # hanging up mid-sentence stops the voice
     call2 = caller.Call(FakeCalls(), 42)
     asyncio.get_running_loop().call_later(0.5, call2.ended.set)

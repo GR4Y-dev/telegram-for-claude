@@ -17,7 +17,9 @@ jobs:
       - name: Install requirements
         run: pip install -r telegram-connector/requirements.txt -r telegram-caller/requirements.txt
       - name: Check the setup scripts
-        run: bash -n telegram-connector/setup.sh && bash -n telegram-caller/setup.sh
+        run: bash -n telegram-connector/setup.sh && bash -n telegram-caller/setup.sh && bash -n update.sh
+      - name: Updater tests
+        run: bash tests/test_update.sh
       - name: Connector tests
         run: python tests/test_connector.py
       - name: Call assistant tests

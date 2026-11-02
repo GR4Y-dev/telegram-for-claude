@@ -16,6 +16,14 @@ while it thinks) and starts speaking as soon as the first sentence is ready. Say
 "خداحافظ" to end, or just hang up. During a call Claude can search the web and read your
 Telegram, but it can't send, edit or delete anything. It only ever talks to your main account.
 
+## Messages it understands (from your main account only)
+
+| Message | What it does |
+|---|---|
+| `/call` (or `call me`, `زنگ بزن`), optionally followed by what to say | Calls you |
+| `/text <message>` | Texts you the message from this account (Claude's `text_me` uses it) |
+| `/update` | Updates every project on the server that has automatic updates on, and texts you the result |
+
 ## Everyday commands
 
 | What | Command |
@@ -24,7 +32,7 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | What happened on calls | `journalctl -u telegram-caller -n 50 --no-pager` |
 | Restart (after changing `.env`) | `systemctl restart telegram-caller` |
 | Stop / start | `systemctl stop telegram-caller` / `systemctl start telegram-caller` |
-| Update to a new version | unzip the new version over this folder, then `bash setup.sh` |
+| Update now | send `/update` to the assistant, or on the server `bash ../update.sh` |
 
 ## Settings (`.env` in this folder, then restart)
 

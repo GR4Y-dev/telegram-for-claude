@@ -290,6 +290,13 @@ async def main():
     check(fake.calls[-1] == ("send", "/call Time for your meds", None), "call_me asks the assistant to call now")
     await call("call_me", message="بیدار شو", schedule_at=server._when(NOW + timedelta(hours=8)))
     check(fake.calls[-1][1] == "/call بیدار شو" and fake.calls[-1][2] is not None, "call_me can be scheduled")
+    c = await call("text_me", message="Exam at 9 tomorrow")
+    check(fake.calls[-1] == ("send", "/text Exam at 9 tomorrow", None), "text_me asks the assistant to text you")
+    await call("text_me", message="Drink water", schedule_at=server._when(NOW + timedelta(hours=2)))
+    check(fake.calls[-1][1] == "/text Drink water" and fake.calls[-1][2] is not None, "text_me can be scheduled")
+    check("empty" in str(await call("text_me", message="  ")), "text_me refuses an empty message")
+    await call("update_server")
+    check(fake.calls[-1] == ("send", "/update", None), "update_server asks the assistant to update")
 
     data, name = await server._fetch_url("https://www.google.com/robots.txt")
     check(name == "robots.txt" and b"User-agent" in data, "downloads a public link")

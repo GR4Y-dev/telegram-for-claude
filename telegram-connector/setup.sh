@@ -60,3 +60,8 @@ echo "    https://$DOMAIN/$MCP_SECRET/mcp"
 echo
 echo "Treat it like a password: anyone with it can use your Telegram."
 echo "Paste it ONLY into claude.ai > Settings > Connectors > Add custom connector."
+if [ -f ../update.sh ] && [ ! -f "/etc/systemd/system/$(basename "$(cd .. && pwd)")-update.timer" ]; then
+  echo
+  read -rp "Update automatically every night (only versions whose tests passed)? (Y/n): " ok
+  if [ "$ok" != "n" ] && [ "$ok" != "N" ]; then bash ../update.sh --install; fi
+fi
