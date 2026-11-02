@@ -54,4 +54,6 @@ sed -i "s/^MCP_SECRET=.*/MCP_SECRET=$(openssl rand -hex 24)/" .env && docker com
 - Reading chats does **not** mark them as read. Only `mark_read` does, when you ask for it.
 - Claude can only edit your own messages. Deleting is at most 50 messages at once.
 - Links to private or local addresses are refused.
+- Nothing piles up on disk: attachments are opened in memory and never saved, and logs are capped
+  at 3 × 10 MB per container.
 - No joining groups, changing your profile, or touching your contacts or settings.

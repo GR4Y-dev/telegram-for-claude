@@ -52,6 +52,7 @@ KOKORO_VOICE=bm_lewis
 PERSONA=jarvis
 JARVIS_ADDRESS=\"${ADDRESS:-sir}\""
   fi
+  read -rp "Most disk space for saved call conversations, in MB (0 = no limit) [1024]: " LIMIT
   umask 077
   cat > .env <<EOF
 OWNER=$OWNER
@@ -60,6 +61,7 @@ TIMEZONE=${TIMEZONE:-${TZ_DEFAULT:-UTC}}
 TRANSCRIBE_API_KEY=$KEY
 CLAUDE_BIN=$CLAUDE_BIN
 CLAUDE_MODEL=haiku
+STORAGE_LIMIT_MB=${LIMIT:-1024}
 CLAUDE_MCP_CONFIG=$DIR/mcp.json
 CLAUDE_ALLOWED_TOOLS=WebSearch,WebFetch,mcp__telegram__whoami,mcp__telegram__list_chats,mcp__telegram__find_chats,mcp__telegram__read_messages,mcp__telegram__search_messages,mcp__telegram__read_attachment,mcp__telegram__get_profile,mcp__telegram__list_scheduled
 VOICE_FA=fa-IR-DilaraNeural
@@ -74,6 +76,7 @@ else
     echo "OWNER_NAME=\"$OWNER_NAME\"" >> .env
   fi
   grep -q '^CLAUDE_MODEL=' .env || echo "CLAUDE_MODEL=haiku" >> .env
+  grep -q '^STORAGE_LIMIT_MB=' .env || echo "STORAGE_LIMIT_MB=1024" >> .env
 fi
 if grep -q '^TTS_EN=kokoro' .env; then
   mkdir -p models

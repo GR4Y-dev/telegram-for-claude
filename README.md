@@ -190,6 +190,9 @@ More commands and every setting: [`telegram-connector/README.md`](telegram-conne
   If it leaks, make a new one (command in `telegram-connector/README.md`).
 - Logins live only on your server (`data/`, `.env`, a Docker volume), readable only by root.
 - The call assistant talks only to your main account and can't send anything during calls.
+- **Disk space stays small.** Attachments are read in memory and never saved on the server.
+  Saved call conversations are kept under `STORAGE_LIMIT_MB` (asked during setup, 1 GB by
+  default, oldest deleted first), and Docker logs are capped at 30 MB per container.
 - Telegram's rules: this logs in as normal user accounts. Personal use is fine; heavy automated
   messaging can get an account limited. There's a built-in limit of 30 sends per hour.
 

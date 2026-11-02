@@ -1,8 +1,16 @@
+# Logs are kept small: at most 3 files of 10 MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   telegram:
     build: .
     container_name: telegram-connector
     restart: unless-stopped
+    logging: *logging
     environment:
       MCP_SECRET: ${MCP_SECRET}
       TIMEZONE: ${TIMEZONE:-UTC}
@@ -22,6 +30,7 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: telegram-tunnel
     restart: unless-stopped
+    logging: *logging
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}

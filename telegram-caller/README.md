@@ -43,3 +43,4 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | `RING_SECONDS` | How long it rings you (default 45) |
 | `QUIET_HANGUP_SECONDS` | Hangs up after this long without hearing you (default 90) |
 | `MAX_CALL_MINUTES` | Longest call (default 30) |
+| `STORAGE_LIMIT_MB` | Most disk space for saved call conversations; the oldest are deleted first (default 1024, `0` = no limit) |

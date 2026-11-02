@@ -62,6 +62,8 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "")            # e.g. "haiku" for 
 RING_SECONDS = int(os.environ.get("RING_SECONDS", "45"))
 QUIET_HANGUP_SECONDS = int(os.environ.get("QUIET_HANGUP_SECONDS", "90"))
 MAX_CALL_MINUTES = int(os.environ.get("MAX_CALL_MINUTES", "30"))
+# Most disk space the saved call conversations may use; the oldest go first. 0 = no limit.
+STORAGE_LIMIT_MB = int(os.environ.get("STORAGE_LIMIT_MB", "1024"))
 
 RATE = 48000                      # call audio: 16-bit mono PCM at 48 kHz
 FRAME_BYTES = RATE * 2 // 100     # 10 ms
@@ -174,6 +176,35 @@ class Listener:
             if self._speech_ms >= MIN_SPEECH_MS:
                 self.turns.put_nowait(bytes(self._buf))
             self._reset()
+
+
+def history_dir() -> Path:
+    """Where Claude Code keeps the conversations of calls (one file per call)."""
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(BASE / "workdir"))
+
+
+def trim_storage(folder: Path | None = None, limit_mb: int | None = None) -> int:
+    """Keep the saved call conversations under the storage limit by deleting the oldest.
+    Returns how many files were deleted."""
+    folder = folder or history_dir()
+    limit = (STORAGE_LIMIT_MB if limit_mb is None else limit_mb) * 1024 * 1024
+    if limit <= 0 or not folder.exists():
+        return 0
+    files = sorted((p for p in folder.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime)
+    total = sum(p.stat().st_size for p in files)
+    removed = 0
+    for p in files:
+        if total <= limit:
+            break
+        total -= p.stat().st_size
+        p.unlink(missing_ok=True)
+        removed += 1
+    for d in sorted((p for p in folder.rglob("*") if p.is_dir()), reverse=True):
+        if not any(d.iterdir()):
+            d.rmdir()
+    if removed:
+        log.info("storage limit: deleted %s old call files, %.0f MB left", removed, total / 1024 / 1024)
+    return removed
 
 
 def to_wav(pcm: bytes) -> bytes:
@@ -487,6 +518,7 @@ class Assistant:
             ChatUpdate.Status.DISCARDED_CALL | ChatUpdate.Status.BUSY_CALL))(self.on_hangup)
         self.calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))(self.on_audio)
         await self.calls.start()
+        trim_storage()
         log.info("ready for calls")
         await self.client.run_until_disconnected()
 
@@ -546,6 +578,10 @@ class Assistant:
                 except Exception:
                     pass
             log.info("call ended")
+            try:
+                trim_storage()
+            except OSError as e:
+                log.warning("couldn't trim the call history: %s", e)
 
     async def on_hangup(self, _, update: ChatUpdate):
         if self.call and update.chat_id == self.call.chat_id:

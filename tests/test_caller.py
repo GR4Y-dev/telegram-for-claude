@@ -82,6 +82,22 @@ async def main():
     check(ear.turns.qsize() == 0, "nothing is heard while the assistant speaks")
     check(caller.to_wav(fa)[:4] == b"RIFF", "speech packed as WAV for speech-to-text")
 
+    # storage limit: the oldest call conversations go first
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        for i in range(5):
+            f = folder / ("sub" if i == 4 else "") / f"call{i}.jsonl"
+            f.parent.mkdir(exist_ok=True)
+            f.write_bytes(b"x" * 400_000)
+            os.utime(f, (1_000_000 + i, 1_000_000 + i))
+        check(caller.trim_storage(folder, limit_mb=0) == 0, "limit 0 means no limit")
+        removed = caller.trim_storage(folder, limit_mb=1)
+        left = sorted(p.name for p in folder.rglob("*.jsonl"))
+        check(removed == 3 and left == ["call3.jsonl", "call4.jsonl"], f"over 1 MB: oldest deleted, newest kept ({left})")
+        check(caller.trim_storage(folder, limit_mb=1) == 0, "under the limit nothing is deleted")
+    check(caller.history_dir().name.endswith("telegram-caller-workdir"), "looks in Claude's folder for this assistant")
+
     # cutting Claude's answer into sentences
     done, rest = caller.split_sentences("Very good, sir. The skies are clear! Shall I")
     check(done == ["Very good, sir.", "The skies are clear!"] and rest.strip() == "Shall I", "English sentences split")
