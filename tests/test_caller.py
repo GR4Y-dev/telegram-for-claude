@@ -98,6 +98,19 @@ async def main():
         check(caller.trim_storage(folder, limit_mb=1) == 0, "under the limit nothing is deleted")
     check(caller.history_dir().name.endswith("telegram-caller-workdir"), "looks in Claude's folder for this assistant")
 
+    # text chat may also call, text and update; calls may not
+    with tempfile.TemporaryDirectory() as tmp:
+        mcp = Path(tmp) / "mcp.json"; mcp.write_text("{}")
+        caller.CLAUDE_MCP_CONFIG, caller.CLAUDE_ALLOWED_TOOLS = str(mcp), "WebSearch,WebFetch"
+        chat_tools, call_tools = caller.allowed_tools(chat=True), caller.allowed_tools(chat=False)
+        check("mcp__telegram__call_me" in chat_tools and "mcp__telegram__text_me" in chat_tools
+              and "mcp__telegram__update_server" in chat_tools, "text chat may call, text and update")
+        check(call_tools == "WebSearch,WebFetch", "a call can't place calls or send texts")
+        caller.CLAUDE_MCP_CONFIG = ""
+        check(caller.allowed_tools(chat=True) == "WebSearch,WebFetch", "without the connector, nothing extra")
+        caller.CLAUDE_ALLOWED_TOOLS = ""
+    check("WebFetch" in caller.CHAT_PROMPT and "wttr.in" in caller.PHONE_PROMPT, "chat and calls are told to fetch live data")
+
     # cutting Claude's answer into sentences
     done, rest = caller.split_sentences("Very good, sir. The skies are clear! Shall I")
     check(done == ["Very good, sir.", "The skies are clear!"] and rest.strip() == "Shall I", "English sentences split")

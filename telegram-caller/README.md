@@ -23,7 +23,7 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | `/call` (or `call me`, `زنگ بزن`), optionally followed by what to say | Calls you |
 | `/text <message>` | Texts you the message from this account (Claude's `text_me` uses it) |
 | `/update` | Updates every project on the server that has automatic updates on, and texts you the result |
-| Any text message | Replies as text, with a typing indicator and conversation memory |
+| Any text message | Replies as text, with a typing indicator and conversation memory. Ask it to call you, text you later or update the server, and it does |
 | A voice note | Sends a transcript, then a text answer (up to 5 minutes / 20 MB) |
 | `/new` | Starts a fresh text conversation; does not reset a call |
 

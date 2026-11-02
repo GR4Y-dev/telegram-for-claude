@@ -97,17 +97,34 @@ JARVIS_PROMPT = (
     f"refined British manners. Address them as \"{JARVIS_ADDRESS}\""
     + (" (\"قربان\" in Persian)." if JARVIS_ADDRESS == "sir" else ".")
 )
+LIVE_DATA_PROMPT = (
+    " For live information such as weather, news or prices, don't stop at search results: open "
+    "a page with WebFetch and give the actual answer, not links. For weather, fetch "
+    "https://wttr.in/<city>?format=j1 and read the forecast from it."
+)
+PHONE_PROMPT += LIVE_DATA_PROMPT
 if PERSONA == "jarvis":
     PHONE_PROMPT += JARVIS_PROMPT
 
 CHAT_PROMPT = (
     f"You are {OWNER_NAME or 'the user'}'s personal AI assistant in a private Telegram chat. "
     "Reply in the user's language. Be helpful and concise; use plain text. Voice notes arrive "
-    "as transcripts and may contain small mistakes. You can search and read with the available "
-    "tools, but cannot send, edit, delete, schedule messages or run server commands. Never "
-    "claim to have done those things; direct the user to the Claude app or the explicit "
-    "/call, /text and /update commands."
-) + (JARVIS_PROMPT if PERSONA == "jarvis" else "")
+    "as transcripts and may contain small mistakes. You can search the web and read the user's "
+    "Telegram. You can also reach the user themself: ring them with call_me (with what to say "
+    "on the call), text them with text_me, either now or at a set time with schedule_at (their "
+    "local time), and update the server with update_server. When they ask for one of those, "
+    "just do it and confirm briefly. You can't message other people, edit or delete anything; "
+    "for that, point them to the Claude app."
+) + LIVE_DATA_PROMPT + (JARVIS_PROMPT if PERSONA == "jarvis" else "")
+# What text chat may do on top of CLAUDE_ALLOWED_TOOLS. These only ever reach the user themself.
+CHAT_EXTRA_TOOLS = "mcp__telegram__call_me,mcp__telegram__text_me,mcp__telegram__update_server"
+
+
+def allowed_tools(chat: bool) -> str:
+    """The tools Claude may use without asking: chats may also call, text and update."""
+    if chat and CLAUDE_ALLOWED_TOOLS and CLAUDE_MCP_CONFIG and Path(CLAUDE_MCP_CONFIG).exists():
+        return f"{CLAUDE_ALLOWED_TOOLS},{CHAT_EXTRA_TOOLS}"
+    return CLAUDE_ALLOWED_TOOLS
 
 
 def time_context() -> str:
@@ -286,8 +303,8 @@ async def think(text: str, session_id: str | None,
         args += ["--model", CLAUDE_MODEL]
     if CLAUDE_MCP_CONFIG and Path(CLAUDE_MCP_CONFIG).exists():
         args += ["--mcp-config", CLAUDE_MCP_CONFIG]
-    if CLAUDE_ALLOWED_TOOLS:
-        args += ["--allowedTools", CLAUDE_ALLOWED_TOOLS]
+    if allowed_tools(chat):
+        args += ["--allowedTools", allowed_tools(chat)]
     workdir = BASE / "workdir"
     workdir.mkdir(exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
@@ -586,6 +603,7 @@ class Assistant:
             asyncio.create_task(self.place_call(rest))
 
     async def send_chat_text(self, event, text):
+        text = text.replace("**", "")  # plain text: Markdown bold would show as stars
         # 2,000 code points also fit Telegram's 4,096 UTF-16-unit limit with emoji.
         for start in range(0, len(text), 2000):
             await event.reply(text[start:start + 2000], parse_mode=None, link_preview=False)
