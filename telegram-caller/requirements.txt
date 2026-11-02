@@ -1,0 +1,7 @@
+py-tgcalls==3.0.0
+telethon==1.45.0
+edge-tts==7.3.1
+kokoro-onnx==0.6.1
+httpx
+numpy
+tzdata

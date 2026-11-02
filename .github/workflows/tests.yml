@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Install requirements
+        run: pip install -r telegram-connector/requirements.txt -r telegram-caller/requirements.txt
+      - name: Check the setup scripts
+        run: bash -n telegram-connector/setup.sh && bash -n telegram-caller/setup.sh
+      - name: Connector tests
+        run: python tests/test_connector.py
+      - name: Call assistant tests
+        env:
+          SKIP_CLAUDE: "1"
+        run: python tests/test_caller.py

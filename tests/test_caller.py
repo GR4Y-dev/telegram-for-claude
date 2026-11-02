@@ -1,0 +1,146 @@
+"""
+Offline tests for the call assistant: real voices, a fake Telegram call.
+
+    pip install -r telegram-caller/requirements.txt
+    python tests/test_caller.py
+
+Needs ffmpeg and internet (for Microsoft's voices). If the `claude` command is installed and
+logged in, a few checks also ask real Claude; set SKIP_CLAUDE=1 to leave them out.
+"""
+import asyncio, importlib, os, shutil, sys, time
+from pathlib import Path
+
+import numpy as np
+
+os.environ.setdefault("OWNER", "@test")
+os.environ["CLAUDE_ALLOWED_TOOLS"] = ""
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "telegram-caller"))
+import caller  # noqa: E402
+
+ok = 0
+def check(cond, what):
+    global ok
+    if not cond:
+        raise SystemExit(f"FAIL: {what}")
+    ok += 1
+    print("ok -", what, flush=True)
+
+def seconds(pcm): return len(pcm) / 2 / caller.RATE
+
+class FakeCalls:
+    """Stands in for the Telegram call: counts the audio sent."""
+    def __init__(self): self.sent = 0; self.first = None
+    async def send_frame(self, chat_id, device, data):
+        assert len(data) == caller.FRAME_BYTES
+        self.sent += len(data)
+        if self.first is None: self.first = time.monotonic()
+
+
+def with_settings(**env):
+    """Reload caller.py with some settings, as if they were in .env."""
+    for k, v in env.items():
+        os.environ[k] = v
+    importlib.reload(caller)
+    for k in env:
+        del os.environ[k]
+    return caller
+
+
+async def main():
+    global caller
+    # names, greeting, Jarvis
+    c = with_settings(OWNER_NAME="Sara", PERSONA="jarvis", JARVIS_ADDRESS="ma'am")
+    g, fa = c.greeting()
+    check(g.endswith("ma'am. How may I help?") and not fa, f"Jarvis greeting: {g}")
+    check(c.PHONE_PROMPT.startswith("You are Sara's") and "Jarvis" in c.PHONE_PROMPT, "name and Jarvis in Claude's instructions")
+    c = with_settings(OWNER_NAME="Sara")
+    check(c.greeting() == ("سلام Sara! جانم، بگو.", True) and "Jarvis" not in c.PHONE_PROMPT, "plain Persian greeting")
+    caller = c = with_settings()
+    check(c.greeting()[0] == "سلام! جانم، بگو." and "the user's" in c.PHONE_PROMPT, "works without a name")
+
+    # speaking
+    fa = await caller.speech("سلام! جانم، بگو.")
+    en = await caller.speech("Hi, how can I help?")
+    check(seconds(fa) > 1 and seconds(en) > 1, f"Persian ({seconds(fa):.1f}s) and English ({seconds(en):.1f}s) speech")
+    check(caller.is_persian("ساعت چنده؟") and not caller.is_persian("what time is it"), "language detection")
+
+    # hearing: quiet room, then speech, then a pause
+    ear = caller.Listener(); ear.start()
+    rng = np.random.default_rng(1)
+    noise = lambda s: (rng.normal(0, 60, int(caller.RATE * s))).astype(np.int16).tobytes()
+    stream = noise(0.8) + fa + noise(1.6)
+    for i in range(0, len(stream), caller.FRAME_BYTES):
+        ear.feed(stream[i:i + caller.FRAME_BYTES])
+    check(ear.turns.qsize() == 1, "one turn detected after the pause")
+    turn = ear.turns.get_nowait()
+    check(seconds(fa) <= seconds(turn) <= seconds(fa) + 1.6, f"turn holds the whole sentence ({seconds(turn):.1f}s)")
+    click = noise(0.5) + (np.ones(int(caller.RATE * 0.1)) * 8000).astype(np.int16).tobytes() + noise(1.5)
+    for i in range(0, len(click), caller.FRAME_BYTES):
+        ear.feed(click[i:i + caller.FRAME_BYTES])
+    check(ear.turns.qsize() == 0, "a short click is ignored")
+    ear.stop(); ear.feed(fa)
+    check(ear.turns.qsize() == 0, "nothing is heard while the assistant speaks")
+    check(caller.to_wav(fa)[:4] == b"RIFF", "speech packed as WAV for speech-to-text")
+
+    # cutting Claude's answer into sentences
+    done, rest = caller.split_sentences("Very good, sir. The skies are clear! Shall I")
+    check(done == ["Very good, sir.", "The skies are clear!"] and rest.strip() == "Shall I", "English sentences split")
+    done, rest = caller.split_sentences("بله قربان. هوا صافه؟ الان")
+    check(done == ["بله قربان.", "هوا صافه؟"] and rest.strip() == "الان", "Persian sentences split")
+    check(caller.split_sentences("It costs 3.5 dollars. Ok")[0] == ["It costs 3.5 dollars."], "decimal numbers aren't cut")
+
+    # real Claude, if it's installed
+    if shutil.which(caller.CLAUDE_BIN) and not os.environ.get("SKIP_CLAUDE"):
+        q = asyncio.Queue(); t0 = time.monotonic()
+        reply, sid = await caller.think("Hi! My name is Sara. Tell me in three short sentences what you can do.", None, q)
+        check(sid and q.qsize() >= 2, f"Claude streams its answer sentence by sentence ({time.monotonic()-t0:.0f}s)")
+        reply2, sid2 = await caller.think("What's my name?", sid)
+        check("sara" in reply2.lower(), f"Claude remembers the call: {reply2[:60]}")
+        reply3, _ = await caller.think("Ok thanks, bye!", sid2)
+        check(reply3.rstrip().endswith("[END]"), f"Claude ends the call on bye: {reply3[:60]}")
+    else:
+        print("-- skipped the real-Claude checks (no claude command, or SKIP_CLAUDE set)")
+
+    # speaking starts while Claude is still writing
+    async def slow_think(text, sid, sentences=None):
+        for s in ["Certainly.", "The weather is clear today.", "Anything else? [END]"]:
+            await asyncio.sleep(1.5); sentences.put_nowait(s.replace("[END]", "").strip())
+        return "Certainly. The weather is clear today. Anything else? [END]", "s2"
+    caller.think = slow_think
+    calls = FakeCalls(); call = caller.Call(calls, 1); call.persian = False
+    async def no_tick(): await asyncio.sleep(3600)
+    call.ticking = no_tick
+    t0 = time.monotonic(); end = await call.respond("hello")
+    check(end is True and call.session_id == "s2", "[END] ends the call")
+    check(calls.first - t0 < 4.5, f"first words after {calls.first - t0:.1f}s, before Claude finished (4.5s)")
+
+    # Claude failing gives a spoken apology
+    async def broken(text, sid, sentences=None): raise RuntimeError("boom")
+    caller.think = broken
+    calls = FakeCalls(); call = caller.Call(calls, 1)
+    check(await call.respond("hello") is False and calls.sent > caller.RATE, "Claude failing gives a spoken apology")
+
+    # a whole call: greeting, a question, goodbye
+    heard = iter(["ساعت چنده؟", "مرسی، خداحافظ"])
+    replies = iter([["ساعت ده شبه."], ["خداحافظ!"]])
+    async def fake_transcribe(pcm): return next(heard)
+    async def fake_think(text, sid, sentences=None):
+        said = next(replies)
+        for s in said: sentences.put_nowait(s)
+        return " ".join(said) + (" [END]" if "خداحافظ" in text else ""), "s1"
+    caller.transcribe, caller.think = fake_transcribe, fake_think
+    calls = FakeCalls(); call = caller.Call(calls, 42)
+    call.ear.turns.put_nowait(b"\x01" * 9600); call.ear.turns.put_nowait(b"\x01" * 9600)
+    await asyncio.wait_for(call.converse("سلام! جانم، بگو."), 60)
+    check(calls.sent > caller.RATE * 2 * 3 and call.session_id == "s1",
+          f"full call: greeting, answer, goodbye ({calls.sent / caller.RATE / 2:.1f}s of audio)")
+
+    # hanging up mid-sentence stops the voice
+    call2 = caller.Call(FakeCalls(), 42)
+    asyncio.get_running_loop().call_later(0.5, call2.ended.set)
+    t0 = time.monotonic()
+    await call2.converse("این یک جمله‌ی خیلی طولانیه که نباید تا آخرش پخش بشه چون تماس قطع شده.")
+    check(time.monotonic() - t0 < 2.5, "hanging up stops the assistant right away")
+
+asyncio.run(main())
+print(f"\nALL {ok} CHECKS PASSED")

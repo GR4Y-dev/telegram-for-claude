@@ -1,0 +1,32 @@
+services:
+  telegram:
+    build: .
+    container_name: telegram-connector
+    restart: unless-stopped
+    environment:
+      MCP_SECRET: ${MCP_SECRET}
+      TIMEZONE: ${TIMEZONE:-UTC}
+      MAX_SENDS_PER_HOUR: ${MAX_SENDS_PER_HOUR:-30}
+      MAX_ATTACHMENT_MB: ${MAX_ATTACHMENT_MB:-20}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      TRANSCRIBE_API_KEY: ${TRANSCRIBE_API_KEY:-}
+      TRANSCRIBE_URL: ${TRANSCRIBE_URL:-https://api.openai.com/v1/audio/transcriptions}
+      TRANSCRIBE_MODEL: ${TRANSCRIBE_MODEL:-gpt-4o-transcribe}
+      CALLER: ${CALLER:-}
+    volumes:
+      - telegram-data:/data
+
+  # Free Cloudflare Tunnel: gives the connector its https:// address (DOMAIN in .env)
+  # without opening any ports on the server.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: telegram-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - telegram
+
+volumes:
+  telegram-data:
