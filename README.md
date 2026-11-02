@@ -1,6 +1,6 @@
 # Telegram for Claude
 
-[![tests](https://github.com/shayanghobadian-pixel/telegram-for-claude/actions/workflows/tests.yml/badge.svg)](https://github.com/shayanghobadian-pixel/telegram-for-claude/actions/workflows/tests.yml)
+[![tests](https://github.com/GR4Y-dev/telegram-for-claude/actions/workflows/tests.yml/badge.svg)](https://github.com/GR4Y-dev/telegram-for-claude/actions/workflows/tests.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Give Claude your Telegram, and give yourself an AI you can **phone**.
@@ -100,7 +100,7 @@ flowchart LR
 
 ```bash
 apt-get update && apt-get install -y git
-git clone https://github.com/shayanghobadian-pixel/telegram-for-claude.git /opt/telegram-for-claude
+git clone https://github.com/GR4Y-dev/telegram-for-claude.git /opt/telegram-for-claude
 ```
 
 ### 3. Run the setup
