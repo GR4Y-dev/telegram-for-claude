@@ -99,8 +99,12 @@ JARVIS_PROMPT = (
 )
 LIVE_DATA_PROMPT = (
     " For live information such as weather, news or prices, don't stop at search results: open "
-    "a page with WebFetch and give the actual answer, not links. For weather, fetch "
-    "https://wttr.in/<city>?format=j1 and read the forecast from it."
+    "a page with WebFetch and give the actual answer, not links. For weather, use Open-Meteo "
+    "(free, no key): find the place with "
+    "https://geocoding-api.open-meteo.com/v1/search?name=<place>&count=1, then fetch "
+    "https://api.open-meteo.com/v1/forecast?latitude=<lat>&longitude=<lon>&hourly="
+    "temperature_2m,precipitation_probability,weather_code&forecast_days=3&timezone=auto "
+    "and answer from that."
 )
 PHONE_PROMPT += LIVE_DATA_PROMPT
 if PERSONA == "jarvis":

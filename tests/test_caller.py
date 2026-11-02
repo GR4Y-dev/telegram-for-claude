@@ -109,7 +109,7 @@ async def main():
         caller.CLAUDE_MCP_CONFIG = ""
         check(caller.allowed_tools(chat=True) == "WebSearch,WebFetch", "without the connector, nothing extra")
         caller.CLAUDE_ALLOWED_TOOLS = ""
-    check("WebFetch" in caller.CHAT_PROMPT and "wttr.in" in caller.PHONE_PROMPT, "chat and calls are told to fetch live data")
+    check("WebFetch" in caller.CHAT_PROMPT and "open-meteo.com" in caller.PHONE_PROMPT, "chat and calls are told to fetch live data")
 
     # cutting Claude's answer into sentences
     done, rest = caller.split_sentences("Very good, sir. The skies are clear! Shall I")
