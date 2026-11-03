@@ -4,8 +4,8 @@ Offline tests for the call assistant: real voices, a fake Telegram call.
     pip install -r telegram-caller/requirements.txt
     python tests/test_caller.py
 
-Needs ffmpeg and internet (for Microsoft's voices). If the `claude` command is installed and
-logged in, a few checks also ask real Claude; set SKIP_CLAUDE=1 to leave them out.
+Needs ffmpeg. SKIP_CLAUDE=1 uses the repository's recorded speech fixtures and a fake
+model, with no provider requests. Without it, also check live voices and Claude.
 """
 import asyncio, importlib, os, shutil, sys, time
 from pathlib import Path
@@ -56,11 +56,23 @@ async def main():
     c = with_settings(OWNER_NAME="Sara")
     check(c.greeting() == ("سلام Sara! جانم، بگو.", True) and "Jarvis" not in c.PHONE_PROMPT, "plain Persian greeting")
     caller = c = with_settings()
+    caller.CLAUDE_CALL_PROCESS = "per-turn"  # the model below is deliberately stubbed
+    if os.environ.get("SKIP_CLAUDE"):
+        samples = Path(__file__).resolve().parents[1] / "docs" / "samples"
+        class RecordedVoice:
+            def __init__(self, text, *args, **kwargs):
+                self.path = samples / ("persian-dilara.mp3" if caller.is_persian(text) else "jarvis-call-greeting.mp3")
+            async def stream(self):
+                yield {"type": "audio", "data": self.path.read_bytes()}
+        caller.edge_tts.Communicate = RecordedVoice
     check(c.greeting()[0] == "سلام! جانم، بگو." and "the user's" in c.PHONE_PROMPT, "works without a name")
 
     # speaking
     fa = await caller.speech("سلام! جانم، بگو.")
     en = await caller.speech("Hi, how can I help?")
+    if os.environ.get("SKIP_CLAUDE"):
+        # A short uninterrupted excerpt for the same VAD checks as the live greeting.
+        fa, en = fa[:caller.RATE * 2 * 2], en[:caller.RATE * 2 * 2]
     check(seconds(fa) > 1 and seconds(en) > 1, f"Persian ({seconds(fa):.1f}s) and English ({seconds(en):.1f}s) speech")
     check(caller.is_persian("ساعت چنده؟") and not caller.is_persian("what time is it"), "language detection")
 
@@ -131,6 +143,10 @@ async def main():
         print("-- skipped the real-Claude checks (no claude command, or SKIP_CLAUDE set)")
 
     # speaking starts while Claude is still writing
+    if os.environ.get("SKIP_CLAUDE"):
+        async def recorded_speech(text):
+            return fa if caller.is_persian(text) else en
+        caller.speech = recorded_speech
     async def slow_think(text, sid, sentences=None):
         for s in ["Certainly.", "The weather is clear today.", "Anything else? [END]"]:
             await asyncio.sleep(1.5); sentences.put_nowait(s.replace("[END]", "").strip())

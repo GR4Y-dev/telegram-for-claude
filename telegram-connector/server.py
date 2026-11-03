@@ -72,6 +72,7 @@ if len(SECRET) < 24 or not SECRET.isalnum():
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 log = logging.getLogger("telegram-connector")
 
 # ---------------------------------------------------------------- telegram
@@ -828,8 +829,7 @@ async def send_message(chat: str, text: str, reply_to_message_id: int | None = N
     except FloodWaitError as e:
         raise _slow_down(e)
     _record_sends()
-    log.info("%s message %s to chat %s", "scheduled" if when else "sent", sent.id,
-             utils.get_peer_id(entity))
+    log.debug("message %s", "scheduled" if when else "sent")
     out = {
         "sent": not when,
         "to": utils.get_display_name(entity),
@@ -897,8 +897,7 @@ async def send_file(
     except FloodWaitError as e:
         raise _slow_down(e)
     _record_sends()
-    log.info("%s file %s to chat %s", "scheduled" if when else "sent", sent.id,
-             utils.get_peer_id(entity))
+    log.debug("file %s", "scheduled" if when else "sent")
     out = {
         "sent": not when,
         "to": utils.get_display_name(entity),
@@ -935,7 +934,7 @@ async def cancel_scheduled(chat: str, message_ids: list[int]) -> dict:
     if not found:
         raise ValueError("None of those are scheduled in that chat. Use list_scheduled.")
     await client(DeleteScheduledMessagesRequest(peer=entity, id=found))
-    log.info("cancelled %s scheduled messages in chat %s", len(found), utils.get_peer_id(entity))
+    log.debug("cancelled %s scheduled messages", len(found))
     return {"cancelled": found, "not_found": [i for i in ids if i not in waiting],
             "chat": utils.get_display_name(entity)}
 
@@ -966,7 +965,7 @@ async def edit_message(chat: str, message_id: int, new_text: str) -> dict:
     except FloodWaitError as e:
         raise _slow_down(e)
     _record_sends()
-    log.info("edited message %s in chat %s", m.id, utils.get_peer_id(entity))
+    log.debug("message edited")
     return {"edited": True, "chat": utils.get_display_name(entity), "message_id": m.id,
             "old_text": m.message or "", "new_text": new_text}
 
@@ -992,7 +991,7 @@ async def forward_messages(
         raise _slow_down(e)
     sent = [s for s in (sent if isinstance(sent, list) else [sent]) if s]
     _record_sends(len(sent))
-    log.info("forwarded %s messages to chat %s", len(sent), utils.get_peer_id(target))
+    log.debug("forwarded %s messages", len(sent))
     return {"forwarded": len(sent), "from": utils.get_display_name(source),
             "to": utils.get_display_name(target), "new_message_ids": [s.id for s in sent]}
 
@@ -1017,7 +1016,7 @@ async def delete_messages(chat: str, message_ids: list[int], for_everyone: bool 
     except FloodWaitError as e:
         raise _slow_down(e)
     count = sum(getattr(d, "pts_count", 0) for d in done)
-    log.info("deleted %s messages in chat %s", count, utils.get_peer_id(entity))
+    log.debug("deleted %s messages", count)
     return {"deleted": count, "chat": utils.get_display_name(entity),
             "for_everyone": for_everyone,
             "messages": [_fmt(m)["text"][:80] for m in found]}

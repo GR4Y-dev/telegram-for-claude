@@ -81,7 +81,7 @@ it sends on the first occurrence. Creating a reminder at an ambiguous or skipped
 you to choose another time.
 
 Facts are supplied to future chat and call turns as reference text, capped at 12 KB per turn;
-`/memories` still lists all saved facts. Adding or deleting facts starts a new text session.
+`/memories` still lists all saved facts. Deleting facts starts a new text session; adding them preserves it.
 An active call starts fresh on its next turn if its supplied facts changed. `/forget` removes
 the fact from the active database but does not erase old Telegram messages, Claude transcript
 files, provider history or backups. `/done` removes the reminder text from the active database.
@@ -113,6 +113,11 @@ database setup is needed. Run only one assistant process against a given state f
 | `JARVIS_ADDRESS` | How Jarvis addresses you (`sir`, `ma'am`, your name, ...) |
 | `TTS_EN` | English voice engine: `kokoro` (runs on your server) or `edge` (Microsoft, online) |
 | `KOKORO_VOICE` | Kokoro voice: `bm_lewis`, `bm_george`, `bm_daniel`, `bm_fable` (British), `am_michael`, `af_heart`, ... |
+| `KOKORO_MODEL` | `fp32` (existing voice, default) or smaller `int8`; listen before switching |
+| `KOKORO_THREADS` | Local voice CPU threads, clamped to 1–2 (default 2) |
+| `CLAUDE_CALL_PROCESS` | `stream` (default, one Claude process per call), or `per-turn` for older/incompatible wrappers |
+| `BARGE_IN` | `1` lets you interrupt speech (default); `0` restores strict turn-taking |
+| `VAD_MODE` | `webrtc` (default speech detector), or `energy` for the older detector |
 | `VOICE_FA` | Persian voice: `fa-IR-DilaraNeural` (female) or `fa-IR-FaridNeural` (male) |
 | `VOICE_EN` | English voice when `TTS_EN=edge`, e.g. `en-US-AvaMultilingualNeural` |
 | `CLAUDE_MODEL` | `haiku` (fast, the default here), or empty for your account's default model |
@@ -123,3 +128,26 @@ database setup is needed. Run only one assistant process against a given state f
 | `QUIET_HANGUP_SECONDS` | Hangs up after this long without hearing you (default 90) |
 | `MAX_CALL_MINUTES` | Longest call (default 30) |
 | `STORAGE_LIMIT_MB` | Most disk space for saved call conversations; the oldest are deleted first (default 1024, `0` = no limit) |
+
+## Lower memory and quicker calls
+
+English Kokoro starts only when it is needed and stops with the call. Persian calls do
+not load it. During a call, Claude stays open between turns, with the same permissions
+and fresh time/fact context. Hanging up cancels outstanding work. Speaking continuously
+for about 350 ms interrupts playback; brief clicks are ignored. Keep speaker volume low
+enough to avoid microphone echo triggering an interruption. `BARGE_IN=0` is available
+for devices without good echo cancellation. The pause before an answer remains 1.2 seconds.
+
+To try the smaller voice, set `KOKORO_MODEL=int8`, run
+`venv/bin/python models.py --env .env`, then restart the caller and listen to English.
+Downloads are checked against pinned sizes and SHA-256 hashes before replacement.
+After you are happy with the voice, `venv/bin/python models.py --env .env --prune-unused`
+removes only the known unused model. The updater downloads missing selected files but
+keeps the previous model for rollback until you choose to remove it. Returning to
+`KOKORO_MODEL=fp32` and running the same downloader restores the original model.
+
+The 2.1.286 stream protocol was checked with two turns through the exact released CLI
+and a local fake API. The live server wrapper, subscription login and actual call latency
+still need a server check. If the stream exits before producing any protocol output,
+the call falls back to per-turn mode. Partial responses and timeouts are not replayed.
+See [performance notes](../PERFORMANCE.md) for measured results and remaining checks.

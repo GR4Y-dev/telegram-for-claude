@@ -272,3 +272,10 @@ Not affiliated with Telegram, Anthropic or OpenAI. "Jarvis" is just a style name
 ## License
 
 [MIT](LICENSE)
+
+## Call performance
+
+Calls now load the English voice only when needed, release it after the call, reuse one
+Claude process, and let you interrupt speech. Updates reuse unchanged container images
+and preserve other applications' Docker resources. See [performance notes](PERFORMANCE.md)
+and the [caller settings](telegram-caller/README.md) for tuning and remaining server checks.

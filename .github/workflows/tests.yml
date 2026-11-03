@@ -38,5 +38,7 @@ jobs:
           python -m unittest discover -s tests -p test_chat.py -v
           python -m unittest discover -s tests -p 'test_assistant_*.py' -v
           python -m unittest discover -s tests -p 'test_security.py' -v
+          python -m unittest discover -s tests -p 'test_runtime.py' -v
+          python -m unittest discover -s tests -p 'test_build_images.py' -v
       - name: Build the connector image
         run: docker build -q telegram-connector
