@@ -151,3 +151,12 @@ and a local fake API. The live server wrapper, subscription login and actual cal
 still need a server check. If the stream exits before producing any protocol output,
 the call falls back to per-turn mode. Partial responses and timeouts are not replayed.
 See [performance notes](../PERFORMANCE.md) for measured results and remaining checks.
+## Letting other people use your assistant
+
+After the optional guest isolation setup, `/allow @username` lets that person chat, send
+voice notes and call the assistant. `/deny` removes access immediately and `/guests` lists
+approved people. Only you can request `/callguest @username | message`. Guests get their own
+conversation and daily limits, with no owner Telegram tools, facts, reminders or files.
+Your own messages and calls take priority. Read the [guest access guide](../GUEST-ACCESS.md)
+for the one-time setup, limits, privacy details and security tests. Existing owner-only
+installs continue working without changing `.env`.

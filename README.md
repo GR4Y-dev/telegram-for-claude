@@ -279,3 +279,9 @@ Calls now load the English voice only when needed, release it after the call, re
 Claude process, and let you interrupt speech. Updates reuse unchanged container images
 and preserve other applications' Docker resources. See [performance notes](PERFORMANCE.md)
 and the [caller settings](telegram-caller/README.md) for tuning and remaining server checks.
+## Letting other people use your assistant
+
+You can approve selected people with `/allow @username`, remove access with `/deny`, and
+list them with `/guests`. Guests have separate conversations, daily limits and restricted
+web-only AI sessions. Your requests go first. This optional feature requires one-time
+Linux isolation setup and stays off until configured. See the [guest access guide](GUEST-ACCESS.md).

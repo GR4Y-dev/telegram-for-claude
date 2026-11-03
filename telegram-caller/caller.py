@@ -19,6 +19,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import wave
@@ -429,6 +430,27 @@ async def _to_call_audio(data: bytes, *input_format: str) -> bytes:
             await stop(proc)
 
 
+async def decode_guest_audio(data: bytes) -> bytes:
+    """Measure real decoded duration, not sender-controlled voice metadata.
+
+    Only stdin is allowed: playlist-like uploads cannot open files or network URLs.
+    One extra second distinguishes an over-limit clip without decoding it all.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-loglevel", "error", "-protocol_whitelist", "pipe", "-i", "pipe:0",
+        "-vn", "-t", str(MAX_VOICE_SECONDS + 1), "-f", "s16le", "-ac", "1",
+        "-ar", str(RATE), "pipe:1", stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=os.name == "posix")
+    try:
+        pcm, _ = await asyncio.wait_for(proc.communicate(data), 20)
+        if proc.returncode or not pcm:
+            raise ValueError("Invalid voice note")
+        return pcm
+    finally:
+        await stop(proc)
+
+
 async def speech(text: str, worker=None) -> bytes:
     """English local speech runs outside the long-lived assistant process."""
     if not is_persian(text) and TTS_EN == "kokoro":
@@ -689,6 +711,8 @@ class Assistant:
         self.chat_pending = 0
         self.store = Store(STATE_FILE)
         self.state_lock = asyncio.Lock()
+        from guests import Guests
+        self.guests = Guests(self, sys.modules[__name__])
 
     async def run(self):
         if not OWNER:
@@ -711,6 +735,7 @@ class Assistant:
         try:
             await self.client.run_until_disconnected()
         finally:
+            await self.guests.cancel()
             if self.call_job:
                 self.call_job.cancel()
                 await asyncio.gather(self.call_job, return_exceptions=True)
@@ -720,8 +745,17 @@ class Assistant:
             self.store.close()
 
     async def on_message(self, event):
-        if event.sender_id != self.owner_id or not event.is_private:
+        if not event.is_private:
             return
+        guests = getattr(self, "guests", None)
+        if event.sender_id != self.owner_id:
+            if guests:
+                await guests.message(event)
+            return
+        if guests:
+            await guests.owner_activity()
+            if await guests.owner_command(event):
+                return
         # Forwarded commands are quoted content, never instructions to act.
         m = None if getattr(event, "fwd_from", None) else COMMAND.match((event.raw_text or "").strip())
         if not m:
@@ -956,7 +990,14 @@ class Assistant:
         await self.talk(chat_id, opening, persian)
 
     async def on_ring(self, _, update: ChatUpdate):
-        if update.chat_id != self.owner_id or self.call or getattr(self, "call_job", None):
+        guests = getattr(self, "guests", None)
+        if update.chat_id != self.owner_id:
+            if guests:
+                await guests.ring(update)
+            return
+        if guests:
+            await guests.owner_activity()
+        if self.call or getattr(self, "call_job", None):
             return
         # The library waits for handlers to finish, so the call runs on its own.
         self.launch_call(self.answer, update.chat_id)
