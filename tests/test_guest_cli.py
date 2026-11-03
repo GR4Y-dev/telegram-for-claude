@@ -94,6 +94,7 @@ async def main():
             assert other[1] != second[1] and len(requests[-1]["messages"]) == 1
             tools = {tool["name"] for request in requests for tool in request.get("tools",[])}
             assert tools <= {"WebSearch","WebFetch","web_search"}, tools
+            assert "WebFetch" in tools and tools & {"WebSearch","web_search"}, tools
             print("CLI 2.1.286: process reuse, restart/resume, guest separation, web-only tools, cleanup")
         finally:
             await engine.close()

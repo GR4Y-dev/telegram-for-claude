@@ -50,6 +50,17 @@ class Guests:
     def owner(self):
         return self.a.owner_id
 
+    async def startup(self):
+        # Reap an interrupted old guest even if access has since been switched off,
+        # without making existing owner-only installs depend on Docker.
+        if (self.runtime.root / ".docker-client/config.json").is_file():
+            try:
+                await self.runtime.reap_orphans()
+            except Exception as exc:
+                self.runtime.failed = True
+                self.api.log.warning("guest startup cleanup failed (%s); guests disabled until restart",
+                                     type(exc).__name__)
+
     def current(self, guest, generation):
         return self.enabled and self.store.current(self.owner, guest, generation)
 
@@ -216,10 +227,10 @@ class Guests:
             if not self.store.charge(self.owner, guest, generation, messages=1):
                 await self.exhausted(guest, generation)
                 return
-            await self.introduction(row)
             self.store.reset(self.owner, guest)
             await self.cancel(guest)
             await self.runtime.clear(self.owner, guest)
+            await self.introduction(self.store.get(self.owner, guest))
             await self.send(guest, self.store.get(self.owner, guest)["generation"], "Started a fresh conversation. Daily limits are unchanged.")
             return
         if not self.available():

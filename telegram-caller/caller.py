@@ -19,6 +19,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -720,6 +721,7 @@ class Assistant:
         await self.client.start()
         owner = await self.client.get_entity(OWNER)
         self.owner_id = owner.id
+        await self.guests.startup()
         self.chat_session_id = load_chat_session(self.owner_id)
         log.info("assistant account connected; owner resolved")
 
@@ -1066,4 +1068,12 @@ if __name__ == "__main__":
     # has to exist first.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(Assistant().run())
+    assistant = Assistant()
+    if os.name == "posix":
+        # A normal service stop must await guest-container cleanup before exiting.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(assistant.client.disconnect()))
+    try:
+        loop.run_until_complete(assistant.run())
+    finally:
+        loop.close()

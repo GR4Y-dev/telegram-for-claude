@@ -61,6 +61,27 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await engine.close()
 
+    async def test_restart_reaps_only_this_installation(self):
+        other = GuestRuntime(self.root / "other-install", "/bin/true", self.root / "unused")
+        other_folder = other.folder(9,33,1)
+        names = ["guest-restart-" + uuid.uuid4().hex, "guest-unrelated-" + uuid.uuid4().hex]
+        try:
+            for runtime,folder,name in ((self.runtime,self.folder,names[0]),(other,other_folder,names[1])):
+                args = runtime.base_args(folder,name,auth=False)
+                args.insert(args.index("run")+1,"--detach")
+                await docker_command(args + ["/bin/sh","-c","sleep 60"])
+            await self.runtime.reap_orphans()
+            own = await docker_command(self.runtime.docker_args() + ["ps","-aq","--filter",f"name=^{names[0]}$"])
+            unrelated = await docker_command(other.docker_args() + ["ps","-aq","--filter",f"name=^{names[1]}$"])
+            self.assertEqual(own,"")
+            self.assertTrue(unrelated)
+        finally:
+            for runtime,name in ((self.runtime,names[0]),(other,names[1])):
+                try:
+                    await docker_command(runtime.docker_args() + ["rm","-f",name])
+                except Exception:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,8 +86,9 @@ logs. Only the native CLI (read-only) and that guest's numeric-ID directory are 
 No owner home, account files, server data, Docker socket, other guest directory or owner
 environment is mounted/passed. Temporary storage is limited. The controller force-removes
 the actual container on cancellation; killing the Docker client alone would be insufficient.
-If cleanup cannot be confirmed, new guest work is refused until restart. The first guest
-request after a restart removes only orphan containers labelled for this installation.
+Normal service stops await guest cleanup. If cleanup cannot be confirmed, new guest work
+is refused until restart. Startup removes only orphan containers labelled for this
+installation, including when guest access has since been switched off.
 The Docker client also uses an empty private configuration, so it cannot inherit the
 owner's proxy settings or remote Docker context.
 

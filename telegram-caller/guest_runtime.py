@@ -102,14 +102,17 @@ class GuestRuntime:
                 raise GuestUnavailable("Guest runtime image is missing or unrecognized")
             # A service crash can leave a daemon-owned child. Reap only this install's
             # labelled containers, never owner connectors or another application's work.
-            old = await docker_command(self.docker_args() + ["ps", "-aq", "--filter",
-                                         f"label=telegram.guest-session={self.instance}"])
-            ids = old.split()
-            if any(not re.fullmatch(r"[a-f0-9]{12,64}", item) for item in ids):
-                raise GuestUnavailable("Unexpected guest container identity")
-            if ids:
-                await docker_command(self.docker_args() + ["rm", "-f", *ids])
+            await self.reap_orphans()
             self.checked = True
+
+    async def reap_orphans(self):
+        old = await docker_command(self.docker_args() + ["ps", "-aq", "--filter",
+                                     f"label=telegram.guest-session={self.instance}"])
+        ids = old.split()
+        if any(not re.fullmatch(r"[a-f0-9]{12,64}", item) for item in ids):
+            raise GuestUnavailable("Unexpected guest container identity")
+        if ids:
+            await docker_command(self.docker_args() + ["rm", "-f", *ids])
 
     def folder(self, owner, guest, generation):
         if any(type(n) is not int or n <= 0 for n in (owner,guest,generation)):
