@@ -4,6 +4,8 @@
 data/
 account.json
 mcp.json
+assistant.sqlite3*
+chat.json
 
 # Made on the server
 venv/

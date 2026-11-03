@@ -19,6 +19,7 @@ import logging
 import mimetypes
 import os
 import re
+import zipfile
 import time
 from collections import deque
 from datetime import datetime, timedelta
@@ -70,6 +71,7 @@ if len(SECRET) < 24 or not SECRET.isalnum():
     )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("telegram-connector")
 
 # ---------------------------------------------------------------- telegram
@@ -300,6 +302,8 @@ def _cut(text: str) -> str:
 def _to_image(data: bytes) -> Image:
     """Shrink a picture so Claude can look at it, and send it as a JPEG."""
     with PILImage.open(io.BytesIO(data)) as im:
+        if im.width * im.height > 25_000_000:
+            raise ValueError("That image is too large to decode safely (25 megapixels max).")
         im.seek(0)  # first frame of GIFs and animated pictures
         im = ImageOps.exif_transpose(im)
         im.thumbnail((IMAGE_SIDE, IMAGE_SIDE))
@@ -322,7 +326,7 @@ def _read_pdf(data: bytes, start_page: int) -> list:
     if start > pages:
         raise ValueError(f"This PDF has only {pages} pages.")
     parts, total, last, letters = [], 0, start - 1, 0
-    for i in range(start - 1, pages):
+    for i in range(start - 1, min(pages, start + 49)):
         text = doc[i].get_text().strip()
         chunk = f"--- page {i + 1} ---\n{text}"
         if parts and total + len(chunk) > MAX_TEXT_CHARS:
@@ -338,17 +342,29 @@ def _read_pdf(data: bytes, start_page: int) -> list:
         out[0] = (f"PDF with {pages} pages. It has almost no text inside (probably scanned), "
                   f"so here are pages {start}-{last} as pictures.")
         for i in range(start - 1, last):
-            out.append(_to_image(doc[i].get_pixmap(dpi=110).tobytes("png")))
+            page = doc[i]
+            scale = min(110 / 72, IMAGE_SIDE / max(1, page.rect.width, page.rect.height))
+            out.append(_to_image(page.get_pixmap(matrix=pymupdf.Matrix(scale, scale)).tobytes("png")))
     else:
         out.append("\n\n".join(parts))
     if last < pages:
         out.append(f"More pages left: call read_attachment again with start_page={last + 1}.")
+    doc.close()
     return out
+
+
+def _check_office_size(data: bytes) -> None:
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        items = archive.infolist()
+        if (len(items) > 10000 or sum(x.file_size for x in items) > 64 * 1024 * 1024
+                or any(x.file_size > 32 * 1024 * 1024 for x in items)):
+            raise ValueError("That document expands beyond the safe reading limit.")
 
 
 def _read_docx(data: bytes) -> list:
     import docx
 
+    _check_office_size(data)
     d = docx.Document(io.BytesIO(data))
     lines = [p.text for p in d.paragraphs if p.text.strip()]
     for n, table in enumerate(d.tables, 1):
@@ -361,16 +377,24 @@ def _read_docx(data: bytes) -> list:
 def _read_xlsx(data: bytes) -> list:
     import openpyxl
 
+    _check_office_size(data)
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     lines = []
-    for ws in wb.worksheets:
+    for ws in wb.worksheets[:20]:
         lines.append(f"=== sheet: {ws.title} ===")
-        for row in ws.iter_rows(values_only=True):
+        total = sum(map(len, lines))
+        for row in ws.iter_rows(max_row=min(ws.max_row or 10000, 10000),
+                                max_col=min(ws.max_column or 100, 100), values_only=True):
             if any(v is not None for v in row):
-                lines.append(",".join("" if v is None else str(v) for v in row))
+                line = ",".join("" if v is None else str(v) for v in row)
+                lines.append(line)
+                total += len(line)
+                if total > MAX_TEXT_CHARS:
+                    break
         if sum(map(len, lines)) > MAX_TEXT_CHARS:
             break
-    return [_cut("\n".join(lines))]
+    wb.close()
+    return [_cut("\n".join(lines)) + "\n[Limited to 20 sheets, 10,000 rows and 100 columns per sheet.]"]
 
 
 def _as_text(data: bytes) -> str | None:
@@ -472,6 +496,8 @@ async def _transcribe(client: TelegramClient, entity, m, name: str,
 
 # ---------------------------------------------------------------- getting files to send
 def _check_public(host: str, infos) -> None:
+    if not infos:
+        raise ValueError("That hostname has no public addresses.")
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if not ip.is_global:
@@ -482,15 +508,21 @@ async def _fetch_url(url: str) -> tuple[bytes, str]:
     """Download a public web link (max MAX_UPLOAD_MB). Returns the bytes and a file name."""
     limit = MAX_UPLOAD_MB * 1024 * 1024
     loop = asyncio.get_running_loop()
-    async with httpx.AsyncClient(timeout=60, follow_redirects=False,
+    async with httpx.AsyncClient(timeout=60, follow_redirects=False, trust_env=False,
                                  headers={"User-Agent": "Mozilla/5.0"}) as http:
         for _ in range(6):
             p = urlparse(url)
             if p.scheme not in ("http", "https") or not p.hostname:
                 raise ValueError("Only http:// and https:// links work.")
-            _check_public(p.hostname, await loop.getaddrinfo(
-                p.hostname, p.port or (443 if p.scheme == "https" else 80)))
-            async with http.stream("GET", url) as r:
+            if p.username or p.password:
+                raise ValueError("Links containing login credentials are not supported.")
+            infos = await loop.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
+            _check_public(p.hostname, infos)
+            # Connect to the address we checked, not a second DNS lookup which can change.
+            original = httpx.URL(url)
+            pinned = original.copy_with(host=infos[0][4][0])
+            async with http.stream("GET", pinned, headers={"Host": original.netloc.decode("ascii")},
+                                   extensions={"sni_hostname": original.raw_host.decode("ascii")}) as r:
                 if r.is_redirect:
                     url = urljoin(url, r.headers["location"])
                     continue
@@ -516,6 +548,7 @@ async def _fetch_url(url: str) -> tuple[bytes, str]:
 # ---------------------------------------------------------------- MCP server
 mcp = FastMCP(
     name="Telegram",
+    log_level="WARNING",  # Request URLs contain the connector's bearer secret.
     instructions=(
         "These tools act as the user's OWN personal Telegram account, not a bot. "
         "Anything sent appears as written by the user. Before calling send_message, "
