@@ -464,13 +464,17 @@ class Call:
         self.stream_disabled = False
 
     async def close(self):
-        if self.conversation:
-            await self.conversation.close()
-            self.conversation = None
-        await self.voice.close()
-        self.ear.stop()
-        while not self.ear.turns.empty():
-            self.ear.turns.get_nowait()
+        conversation, self.conversation = self.conversation, None
+        try:
+            if conversation:
+                await conversation.close()
+        finally:
+            try:
+                await self.voice.close()
+            finally:
+                self.ear.stop()
+                while not self.ear.turns.empty():
+                    self.ear.turns.get_nowait()
 
     async def play_pcm(self, pcm: bytes):
         loop = asyncio.get_running_loop()
@@ -959,6 +963,7 @@ class Assistant:
 
     def launch_call(self, function, *args):
         """Reserve the single slot before the first await (including ringing time)."""
+        self.call_target = self.owner_id
         async def run():
             try:
                 await function(*args)
@@ -966,6 +971,7 @@ class Assistant:
                 log.warning("call job failed (%s)", type(exc).__name__)
             finally:
                 self.call_job = None
+                self.call_target = None
         self.call_job = asyncio.create_task(run())
 
     async def answer(self, chat_id: int):
@@ -985,8 +991,10 @@ class Assistant:
         except Exception:
             log.exception("call failed")
         finally:
-            await call.close()
-            self.call = None
+            try:
+                await call.close()
+            finally:
+                self.call = None
             if not call.ended.is_set():
                 try:
                     await self.calls.leave_call(chat_id)
@@ -1001,7 +1009,9 @@ class Assistant:
     async def on_hangup(self, _, update: ChatUpdate):
         if self.call and update.chat_id == self.call.chat_id:
             self.call.ended.set()
-            if getattr(self, "call_job", None):
+        if ((self.call and update.chat_id == self.call.chat_id)
+                or update.chat_id == getattr(self, "call_target", None)):
+            if getattr(self, "call_job", None) and not self.call_job.cancelling():
                 self.call_job.cancel()
 
     async def on_audio(self, _, update: StreamFrames):
