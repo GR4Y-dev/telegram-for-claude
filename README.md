@@ -33,6 +33,8 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 **Call assistant**
 - Answers your calls and calls you back; ignores everyone else
 - Chats by text with a typing indicator and conversation memory; `/new` starts fresh
+- Saves facts you explicitly ask it to remember, and sends one-time or repeating reminders
+  with snooze and done commands, even when Claude's usage limit is reached
 - Transcribes voice notes and replies in text; chats and calls know the current local and UTC time
 - Turn-based talk: speech-to-text → Claude Code → speech, with a soft tick while it thinks
 - Starts speaking Claude's first sentence while the rest is still being written
@@ -184,6 +186,27 @@ By hand, on the server: `cd /opt/telegram-for-claude && bash update.sh` (or afte
 
 ## Messages from your assistant
 
+Send these directly to your assistant's private Telegram chat:
+
+| Message | What happens |
+|---|---|
+| `Remember that I prefer short answers` | Saves a fact for future chats and calls |
+| `/memories` | Lists saved facts with their IDs |
+| `/forget 1` | Removes fact #1 and starts a fresh chat |
+| `Remind me in 20 minutes to take a break` | Saves a one-time reminder |
+| `Remind me every weekday at 8am to study` | Repeats Monday through Friday in your configured time zone |
+| `/reminders` (or `/tasks`) | Shows unfinished reminders |
+| `/snooze 1 20` | Postpones reminder #1 by 20 minutes |
+| `/done 1` | Finishes reminder #1 and stops any repeats |
+| `/new` | Starts a fresh chat while keeping saved facts and reminders |
+
+These commands work without Claude. The assistant service and Telegram connection must be
+running to deliver reminders. Voice notes can use the same English commands, but still need
+the speech-to-text service. Forwarded messages cannot create or change saved facts or reminders.
+See [the reference](telegram-caller/README.md#saved-facts-and-reminders) for examples, limits,
+restart behavior and backups. These new features are in the Telegram assistant; WhatsApp
+keeps its existing scheduled-message feature.
+
 - Ask Claude "text me tomorrow at 8: bring the passport" and your assistant's account texts you
   then (`text_me`). "Call me at 8" rings instead (`call_me`).
 - Scripts on your server can text you too: anything written to a `.txt` file in
@@ -207,6 +230,8 @@ More commands and every setting: [`telegram-connector/README.md`](telegram-conne
 
 ## Security and privacy
 
+The [security review](SECURITY-REVIEW.md) explains the fixes, checks and remaining limits.
+
 - **Cut Claude off any time:** Telegram → Settings → Devices → end "Claude connector"
   (and "AI assistant" for the call account), or remove the connector in claude.ai.
 - The connector address contains a long random secret; every other address returns "Not Found".
@@ -225,6 +250,9 @@ More commands and every setting: [`telegram-connector/README.md`](telegram-conne
 pip install -r telegram-connector/requirements.txt -r telegram-caller/requirements.txt
 python tests/test_connector.py      # fake Telegram account, real file reading
 python tests/test_caller.py         # needs ffmpeg; uses real Claude if `claude` is installed
+python -m unittest discover -s tests -p 'test_chat.py'
+python -m unittest discover -s tests -p 'test_assistant_*.py'
+python -m unittest discover -s tests -p 'test_security.py'
 ```
 
 ## Credits

@@ -25,7 +25,7 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | `/update` | Updates every project on the server that has automatic updates on, and texts you the result |
 | Any text message | Replies as text, with a typing indicator and conversation memory. Ask it to call you, text you later or update the server, and it does |
 | A voice note | Sends a transcript, then a text answer (up to 5 minutes / 20 MB) |
-| `/new` | Starts a fresh text conversation; does not reset a call |
+| `/new` | Starts a fresh text conversation; keeps saved facts and reminders and does not reset a call |
 
 Text and voice notes share one conversation, which continues across restarts and updates until
 you send `/new` (or until the storage limit removes its oldest history). Messages are processed
@@ -36,6 +36,63 @@ Every chat and call turn includes the current time in `TIMEZONE` and UTC. Set `T
 `Europe/Istanbul` for Istanbul time; the assistant does not assume the server OS uses that zone.
 Replies use the existing Claude Code login and voice notes use the existing transcription key.
 Claude login or usage-limit problems produce a retry message. No new keys are required.
+
+## Saved facts and reminders
+
+Only direct private messages from your configured owner account can change saved facts and
+reminders. English phrases below and slash commands are recognized without a model. Other
+languages still work for ordinary conversation; use slash commands for reliable scheduling.
+Forwarded text and voice notes are treated as quoted content and do not run commands.
+
+| Send | Result |
+|---|---|
+| `/remember I prefer tea` or `Remember that I prefer tea` | Saves a fact until you remove it |
+| `/memories` | Lists saved facts and IDs |
+| `/forget 2` | Deletes fact #2 and starts fresh to avoid reusing that fact from the active chat |
+| `/remind in 20 minutes \| Take a break` | One-time reminder; hours and days also work |
+| `Remind me tomorrow at 8am to study` | One-time reminder in `TIMEZONE` |
+| `/remind 2027-12-10 09:00 \| Bring my passport` | Reminder at an explicit date and time |
+| `/remind daily 08:00 \| Study` | Every day at 08:00 |
+| `/remind weekdays 08:00 \| Study` | Monday through Friday |
+| `Remind me every Wednesday at 8am to exercise` | Weekly on Wednesday |
+| `/remind weekly 08:00 \| Review tasks` | Weekly on today's weekday |
+| `/reminders` or `/tasks` | Lists unfinished tasks, dates and IDs |
+| `/snooze 2 20` or `snooze #2 for 20 minutes` | Postpones reminder #2 by 20 minutes |
+| `/done 2` or `done #2` | Removes reminder #2, including its repeating series |
+| `/help` | Shows the command examples |
+
+The confirmation always shows the date, time zone and reminder ID. Times without am/pm use
+the 24-hour clock. An unclear time produces help instead of a guessed reminder. There can be
+100 saved facts and 100 unfinished reminders per owner, with 2,000 characters per item.
+Delivered one-time reminders remain in `/tasks` until you mark them done or snooze them.
+Snoozing accepts 1 minute through 7 days and does not change a repeating reminder's usual time.
+
+The worker checks every 15 seconds, independently of Claude and the current conversation.
+After downtime, a missed reminder sends once; recurring reminders then advance to their next
+future occurrence without sending a backlog. Failed sends stay pending. A crash immediately
+after Telegram accepts a message can cause a duplicate on retry; delivery is not exactly-once.
+The assistant must be running and connected to Telegram. Voice commands additionally need
+transcription; text commands and reminder delivery do not spend Claude usage.
+
+Repeats keep their local clock time in the zone recorded when created. A later `TIMEZONE`
+change applies to new reminders; recreate existing ones to change their zone. During a
+daylight-saving gap, an existing repeat moves forward through the gap. During a repeated hour,
+it sends on the first occurrence. Creating a reminder at an ambiguous or skipped time asks
+you to choose another time.
+
+Facts are supplied to future chat and call turns as reference text, capped at 12 KB per turn;
+`/memories` still lists all saved facts. Adding or deleting facts starts a new text session.
+An active call starts fresh on its next turn if its supplied facts changed. `/forget` removes
+the fact from the active database but does not erase old Telegram messages, Claude transcript
+files, provider history or backups. `/done` removes the reminder text from the active database.
+
+State is in `data/assistant.sqlite3` beside `account.json`, separate from Claude's existing
+`data/chat.json` session pointer and conversation history. `STATE_FILE` can override this
+location. New database and chat files are created with private permissions on Linux. The
+database is not encrypted. To back it up consistently, stop `telegram-caller`, copy its whole
+`data` directory to a private backup, then start it again. Do not copy a live SQLite file on
+its own while its WAL file is in use. Updates preserve this state; no new API key or manual
+database setup is needed. Run only one assistant process against a given state file.
 
 ## Everyday commands
 
@@ -60,6 +117,7 @@ Claude login or usage-limit problems produce a retry message. No new keys are re
 | `VOICE_EN` | English voice when `TTS_EN=edge`, e.g. `en-US-AvaMultilingualNeural` |
 | `CLAUDE_MODEL` | `haiku` (fast, the default here), or empty for your account's default model |
 | `TIMEZONE` | Your time zone (for "good morning" and times) |
+| `STATE_FILE` | Optional path for saved facts and reminders; defaults beside `ACCOUNT_FILE` |
 | `END_OF_TURN_MS` | How long a pause ends your turn, in milliseconds (default 1200). Lower answers sooner but may cut you off mid-sentence |
 | `RING_SECONDS` | How long it rings you (default 45) |
 | `QUIET_HANGUP_SECONDS` | Hangs up after this long without hearing you (default 90) |

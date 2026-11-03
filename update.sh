@@ -75,7 +75,7 @@ EOF
     exit 0 ;;
 esac
 
-exec 9>"/tmp/$NAME-update.lock"
+exec 9>"$(git rev-parse --git-path update.lock)"
 flock -n 9 || { echo "An update is already running."; exit 0; }
 
 git fetch -q origin main
@@ -90,15 +90,21 @@ fi
 # Only take a version whose tests passed on GitHub.
 SLUG="$(git remote get-url origin | sed -E 's#(\.git)?/*$##; s#^.*github\.com[:/]##')"
 TESTS="$(curl -fsS -H 'Accept: application/vnd.github+json' \
-  "https://api.github.com/repos/$SLUG/commits/$NEW/check-runs" 2>/dev/null | python3 -c '
+  "https://api.github.com/repos/$SLUG/commits/$NEW/check-runs?per_page=100" 2>/dev/null | python3 -c '
 import json, sys
-runs = json.load(sys.stdin).get("check_runs", [])
-if not runs: print("none")
+data = json.load(sys.stdin)
+runs = data.get("check_runs", [])
+tests = [r for r in runs if r.get("name") == "tests" and r.get("app", {}).get("slug") == "github-actions"]
+if data.get("total_count", len(runs)) > len(runs): print("unknown")
+elif not tests: print("none")
 elif any(r["status"] != "completed" for r in runs): print("running")
-elif all(r["conclusion"] in ("success", "neutral", "skipped") for r in runs): print("passed")
+elif all(r.get("conclusion") == "success" for r in tests) and all(r.get("conclusion") in ("success", "neutral", "skipped") for r in runs): print("passed")
 else: print("failed")' 2>/dev/null || echo unknown)"
 case "$TESTS" in
-  passed|none) ;;
+  passed) ;;
+  none)
+    [ "$REPORT" = 1 ] && notify "⏳ Not updating $TITLE: waiting for the GitHub tests to pass."
+    echo "No trusted test result yet."; exit 0 ;;
   running)
     [ "$REPORT" = 1 ] && notify "⏳ A new version of $TITLE is still being tested. Try again in a few minutes."
     echo "The new version's tests are still running."; exit 0 ;;

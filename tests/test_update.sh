@@ -16,7 +16,7 @@ command -v flock >/dev/null || printf '#!/bin/sh\nexit 0\n' > "$T/bin/flock"
 if ! python3 -c "" 2>/dev/null; then printf '#!/bin/sh\nexec python "$@"\n' > "$T/bin/python3"; fi
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH" OUTBOX_DIR="$T/outbox"
-results() { echo "{\"check_runs\": [{\"status\": \"$1\", \"conclusion\": $2}]}" > "$T/checks.json"; }
+results() { echo "{\"check_runs\": [{\"name\": \"tests\", \"app\": {\"slug\": \"github-actions\"}, \"status\": \"$1\", \"conclusion\": $2}]}" > "$T/checks.json"; }
 
 # "GitHub", a developer's copy, and the server's copy.
 git init -q --bare -b main "$T/github.git"
@@ -42,6 +42,15 @@ rm -f "$T"/outbox/*; bash "$S/update.sh" >/dev/null
 check '[ -z "$(ls "$T/outbox")" ]' "the nightly run with nothing new stays quiet"
 
 release "Add reactions"
+echo '{"check_runs":[]}' > "$T/checks.json"
+REPORT=1 bash "$S/update.sh" >/dev/null
+check '[ ! -f "$S/notes.txt" ]' "missing test results cannot install an untested version"
+results completed '"skipped"'; bash "$S/update.sh" >/dev/null
+check '[ ! -f "$S/notes.txt" ]' "skipped tests do not count as passing"
+echo '{"check_runs":[{"name":"tests","app":{"slug":"untrusted"},"status":"completed","conclusion":"success"}]}' > "$T/checks.json"
+bash "$S/update.sh" >/dev/null
+check '[ ! -f "$S/notes.txt" ]' "a different check provider cannot stand in for GitHub tests"
+rm -f "$T"/outbox/*
 results in_progress null; bash "$S/update.sh" >/dev/null
 check '[ ! -f "$S/notes.txt" ] && [ -z "$(ls "$T/outbox")" ]' "a version still being tested isn't installed"
 results completed '"failure"'; bash "$S/update.sh" >/dev/null

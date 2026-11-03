@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest
@@ -16,6 +19,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Install requirements
         run: pip install -r telegram-connector/requirements.txt -r telegram-caller/requirements.txt
+      - name: Check dependencies for known vulnerabilities
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit -r telegram-connector/requirements.txt -r telegram-caller/requirements.txt
       - name: Check the setup scripts
         run: bash -n telegram-connector/setup.sh && bash -n telegram-caller/setup.sh && bash -n update.sh
       - name: Updater tests
@@ -27,4 +34,9 @@ jobs:
           SKIP_CLAUDE: "1"
         run: python tests/test_caller.py
       - name: Text chat tests (offline)
-        run: python -m unittest discover -s tests -p test_chat.py -v
+        run: |
+          python -m unittest discover -s tests -p test_chat.py -v
+          python -m unittest discover -s tests -p 'test_assistant_*.py' -v
+          python -m unittest discover -s tests -p 'test_security.py' -v
+      - name: Build the connector image
+        run: docker build -q telegram-connector
