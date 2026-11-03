@@ -15,6 +15,7 @@ import caller
 from assistant_store import Store
 from guest_store import GuestStore
 from guest_runtime import GuestRuntime, GuestUnavailable
+import guest_runtime
 from guests import Guests, command
 from telethon.tl.types import User, PeerUser
 
@@ -205,6 +206,17 @@ class GuestTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_container_cleanup_blocks_new_guests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = GuestRuntime(Path(tmp)/"guests",Path(tmp)/"binary",Path(tmp)/"auth")
+            engine = guest_runtime.GuestConversation(runtime,"guest-test",[],tmp,{})
+            with patch.object(guest_runtime,"docker_command",AsyncMock(side_effect=[GuestUnavailable("offline"),"0123456789ab"])):
+                with self.assertRaises(GuestUnavailable):
+                    await engine.close()
+            self.assertTrue(runtime.failed)
+            with self.assertRaises(GuestUnavailable):
+                await runtime.ready()
+
     async def test_guest_cli_has_only_web_tools_and_private_mounts(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)

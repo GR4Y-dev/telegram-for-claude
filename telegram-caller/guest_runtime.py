@@ -4,13 +4,13 @@ Only the exact native CLI and that guest's private directory are mounted. No acc
 data, MCP config, host socket, owner environment, plugins or settings are inherited.
 """
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import stat
-import time
 import uuid
 
 from claude_stream import Conversation
@@ -48,10 +48,25 @@ class GuestRuntime:
         self.root, self.binary, self.auth_file = Path(root), Path(binary), Path(auth_file)
         self.docker = "/usr/bin/docker"
         self.checked = False
+        self.failed = False
+        self.instance = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
 
     def docker_args(self):
         # Never inherit a user's remote Docker context or registry credentials.
-        return [self.docker, "--host", "unix:///var/run/docker.sock"]
+        folder = self.root / ".docker-client"
+        if folder.is_symlink():
+            raise GuestUnavailable("Unexpected Docker client configuration")
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        config = folder / "config.json"
+        try:
+            fd = os.open(config, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if config.is_symlink() or config.stat().st_size > 4 or config.read_text().strip() != "{}":
+                raise GuestUnavailable("Unexpected Docker client configuration")
+        else:
+            with os.fdopen(fd, "w") as out:
+                out.write("{}")
+        return [self.docker, "--config", str(folder.resolve()), "--host", "unix:///var/run/docker.sock"]
 
     def credentials(self):
         info = self.auth_file.lstat()
@@ -67,6 +82,8 @@ class GuestRuntime:
         return values
 
     async def ready(self):
+        if self.failed:
+            raise GuestUnavailable("Guest cleanup failed; restart after checking Docker")
         if os.name != "posix" or not Path("/proc").is_dir() or not Path(self.docker).is_file():
             raise GuestUnavailable("Guest isolation requires the Linux container setup")
         self.credentials()
@@ -83,6 +100,15 @@ class GuestRuntime:
                                           '{{index .Config.Labels "telegram.guest-runtime"}}', IMAGE])
             if label != "1":
                 raise GuestUnavailable("Guest runtime image is missing or unrecognized")
+            # A service crash can leave a daemon-owned child. Reap only this install's
+            # labelled containers, never owner connectors or another application's work.
+            old = await docker_command(self.docker_args() + ["ps", "-aq", "--filter",
+                                         f"label=telegram.guest-session={self.instance}"])
+            ids = old.split()
+            if any(not re.fullmatch(r"[a-f0-9]{12,64}", item) for item in ids):
+                raise GuestUnavailable("Unexpected guest container identity")
+            if ids:
+                await docker_command(self.docker_args() + ["rm", "-f", *ids])
             self.checked = True
 
     def folder(self, owner, guest, generation):
@@ -113,7 +139,7 @@ class GuestRuntime:
         if any("," in str(path) or "\n" in str(path) for path in (binary,folder)):
             raise GuestUnavailable("Unsupported mount path")
         args = self.docker_args() + ["run", "--rm", "--init", "-i", "--pull=never", "--name", name,
-                "--label", "telegram.guest-session=1", "--read-only", "--user", f"{UID}:{UID}",
+                "--label", f"telegram.guest-session={self.instance}", "--read-only", "--user", f"{UID}:{UID}",
                 "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=96",
                 "--memory=512m", "--memory-swap=512m", "--cpus=1", "--log-driver=none",
                 "--ulimit", "nofile=1024:1024", "--ulimit", "fsize=33554432:33554432",
@@ -177,9 +203,14 @@ class GuestConversation(Conversation):
             name, self.name = self.name, None
             if name:
                 try:
-                    await docker_command(self.runtime.docker_args() + ["rm", "-f", name])
-                except GuestUnavailable:
-                    # --rm may already have removed it. Confirm no such container remains.
-                    remaining = await docker_command(self.runtime.docker_args() + ["ps", "-aq", "--filter", f"name=^{name}$"])
-                    if remaining:
-                        raise GuestUnavailable("Guest container did not stop")
+                    try:
+                        await docker_command(self.runtime.docker_args() + ["rm", "-f", name])
+                    except GuestUnavailable:
+                        # --rm may already have removed it. Confirm none remains.
+                        remaining = await docker_command(self.runtime.docker_args() + ["ps", "-aq", "--filter", f"name=^{name}$"])
+                        if remaining:
+                            raise GuestUnavailable("Guest container did not stop")
+                except BaseException:
+                    self.runtime.failed = True
+                    self.name = name  # preserve identity for an explicit cleanup retry
+                    raise

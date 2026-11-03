@@ -51,8 +51,8 @@ minutes. At most ten guests can be approved. You and the guest get a limit notic
 most once per guest/day, including across re-approvals. Input/output lengths, processing
 timeouts, model tool turns, storage and container resources are also bounded.
 
-Guest transcript storage is separate, capped at 32 MiB before starting another model
-turn, with a 32 MiB per-file process limit. At the limit, use `/new` or have the owner
+Guest transcript storage is separate, checked against 32 MiB before starting another model
+container, with a 32 MiB per-file process limit. At the limit, use `/new` or have the owner
 revoke/re-approve the guest. Deleting local history does not remove messages already
 sent to Telegram, provider history or backups. Quota/approval records stay in the existing
 `data/assistant.sqlite3`; old usage rows are cleaned after 32 days on startup.
@@ -86,6 +86,10 @@ logs. Only the native CLI (read-only) and that guest's numeric-ID directory are 
 No owner home, account files, server data, Docker socket, other guest directory or owner
 environment is mounted/passed. Temporary storage is limited. The controller force-removes
 the actual container on cancellation; killing the Docker client alone would be insufficient.
+If cleanup cannot be confirmed, new guest work is refused until restart. The first guest
+request after a restart removes only orphan containers labelled for this installation.
+The Docker client also uses an empty private configuration, so it cannot inherit the
+owner's proxy settings or remote Docker context.
 
 Inside that boundary, Claude also gets safe/restricted mode, empty setting sources,
 strict empty MCP configuration and only WebSearch/WebFetch. It never gets the owner's

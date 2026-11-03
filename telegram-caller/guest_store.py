@@ -95,6 +95,8 @@ class GuestStore:
 
     def _remaining(self, owner, guest, kind):
         # kind is selected by this module, never interpolated from user input.
+        if kind not in ("messages", "voice", "calls"):
+            raise ValueError("Unknown usage counter")
         today = self.day()
         own = self.db.execute(f"SELECT {kind} FROM guest_usage WHERE owner=? AND guest=? AND day=?",
                               (owner, guest, today)).fetchone()
@@ -103,6 +105,8 @@ class GuestStore:
         return max(0, min(self.limits[kind] - (own[0] if own else 0), self.total_limits[kind] - total))
 
     def _add(self, owner, guest, kind, amount):
+        if kind not in ("messages", "voice", "calls"):
+            raise ValueError("Unknown usage counter")
         self.db.execute(f"""INSERT INTO guest_usage(owner,guest,day,{kind}) VALUES (?,?,?,?)
             ON CONFLICT(owner,guest,day) DO UPDATE SET {kind}={kind}+excluded.{kind}""",
             (owner, guest, self.day(), amount))

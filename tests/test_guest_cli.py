@@ -81,10 +81,13 @@ async def main():
             second = await engine.ask("Synthetic second turn")
             assert first[0] == "Synthetic reply 1" and second[0] == "Synthetic reply 2"
             assert first[1] == second[1] and engine.proc is process
+            for number in range(3,11):
+                reply = await engine.ask(f"Synthetic turn {number}")
+                assert reply[1] == second[1] and engine.proc is process
             await engine.close()
             engine = await runtime.conversation(7,22,1,second[1],"Synthetic guest test.","claude-haiku-4-5-20251001")
             third = await engine.ask("Synthetic resumed turn")
-            assert third[1] == second[1] and len(requests[-1]["messages"]) == 5
+            assert third[1] == second[1] and len(requests[-1]["messages"]) == 21
             await engine.close()
             engine = await runtime.conversation(7,23,1,second[1],"Different guest.","claude-haiku-4-5-20251001")
             other = await engine.ask("Independent guest")

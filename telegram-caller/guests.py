@@ -82,11 +82,13 @@ class Guests:
         if not self.current(guest, generation):
             return
         if self.store.notice(self.owner, guest):
-            await self.send(guest, generation, "Your daily guest limit is reached. Please try again after midnight UTC.\n"
-                            "سهمیهٔ امروزت تمام شده؛ بعد از نیمه‌شب UTC دوباره امتحان کن.")
-            await self.a.client.send_message(self.owner,
-                f"Guest {guest} reached a daily limit. You will get at most one notice today for this guest.",
-                parse_mode=None, link_preview=False)
+            try:
+                await self.send(guest, generation, "Your daily guest limit is reached. Please try again after midnight UTC.\n"
+                                "سهمیهٔ امروزت تمام شده؛ بعد از نیمه‌شب UTC دوباره امتحان کن.")
+            finally:
+                await self.a.client.send_message(self.owner,
+                    f"Guest {guest} reached a daily limit. You will get at most one notice today for this guest.",
+                    parse_mode=None, link_preview=False)
 
     async def resolve(self, target, event, *, removing=False):
         """Bind authorization to a Telegram user ID; ambiguous display names never win."""
@@ -296,8 +298,8 @@ class Guests:
             if not reservation:
                 await self.exhausted(guest, generation)
                 return
-            await self.runtime.ready()
             async with asyncio.timeout(reservation[1]):
+                await self.runtime.ready()
                 await self.introduction(row)
                 if not self.current(guest, generation):
                     return
