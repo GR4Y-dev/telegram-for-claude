@@ -27,9 +27,9 @@ Telegram, but it can't send, edit or delete anything. It only ever talks to your
 | A voice note | Sends a transcript, then a text answer (up to 5 minutes / 20 MB) |
 | `/new` | Starts a fresh text conversation; does not reset a call |
 
-Text and voice notes share one conversation while the service is running. A service restart
-starts a new chat; previous Claude session files remain subject to the storage limit. Messages
-are processed in order, including `/new`. Calls have separate conversations. Only private
+Text and voice notes share one conversation, which continues across restarts and updates until
+you send `/new` (or until the storage limit removes its oldest history). Messages are processed
+in order, including `/new`. Calls have separate conversations. Only private
 messages from the configured owner are accepted; group messages are ignored.
 
 Every chat and call turn includes the current time in `TIMEZONE` and UTC. Set `TIMEZONE` to

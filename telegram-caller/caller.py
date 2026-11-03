@@ -40,6 +40,7 @@ from telethon.sessions import StringSession
 # ---------------------------------------------------------------- settings
 BASE = Path(__file__).resolve().parent
 ACCOUNT_FILE = Path(os.environ.get("ACCOUNT_FILE", BASE / "data" / "account.json"))
+CHAT_FILE = ACCOUNT_FILE.parent / "chat.json"   # which conversation text chat continues
 OWNER = os.environ.get("OWNER", "").strip()                 # the owner's @username
 OWNER_NAME = os.environ.get("OWNER_NAME", "").strip()       # what the assistant calls them
 TRANSCRIBE_API_KEY = os.environ.get("TRANSCRIBE_API_KEY", "").strip()
@@ -221,6 +222,14 @@ class Listener:
             if self._speech_ms >= MIN_SPEECH_MS:
                 self.turns.put_nowait(bytes(self._buf))
             self._reset()
+
+
+def load_chat_session() -> str | None:
+    """The conversation text chat continues after a restart (saved until /new)."""
+    try:
+        return json.loads(CHAT_FILE.read_text())["session_id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def history_dir() -> Path:
@@ -556,7 +565,7 @@ class Assistant:
         self.calls = PyTgCalls(self.client)
         self.owner_id: int | None = None
         self.call: Call | None = None
-        self.chat_session_id: str | None = None
+        self.chat_session_id = load_chat_session()  # text chat continues where it left off
         self.chat_lock = asyncio.Lock()
         self.chat_pending = 0
 
@@ -612,6 +621,17 @@ class Assistant:
         for start in range(0, len(text), 2000):
             await event.reply(text[start:start + 2000], parse_mode=None, link_preview=False)
 
+    def save_chat_session(self, session_id: str | None):
+        """Remember which conversation the text chat continues, across restarts."""
+        self.chat_session_id = session_id
+        try:
+            if session_id:
+                CHAT_FILE.write_text(json.dumps({"session_id": session_id}))
+            else:
+                CHAT_FILE.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("couldn't save the chat conversation: %s", e)
+
     async def chat_message(self, event, *, reset=False):
         if self.chat_pending >= 10:
             await event.reply("I have several messages waiting. Please try again shortly.")
@@ -621,7 +641,7 @@ class Assistant:
             # Serialize transcription, model turns and resets to preserve conversation order.
             async with self.chat_lock:
                 if reset:
-                    self.chat_session_id = None
+                    self.save_chat_session(None)
                     await event.reply("Started a new conversation. Call conversations are separate.")
                     return
                 text = (event.raw_text or "").strip()
@@ -648,10 +668,12 @@ class Assistant:
                     elif not text:
                         await event.reply("Please send a text message or a voice note.")
                         return
+                    if self.chat_session_id and not (history_dir() / f"{self.chat_session_id}.jsonl").exists():
+                        self.save_chat_session(None)  # removed by the storage limit: start fresh
                     reply, session = await think(text, self.chat_session_id, chat=True)
                     if not reply:
                         raise RuntimeError("Claude returned an empty reply")
-                    self.chat_session_id = session
+                    self.save_chat_session(session)
                     await self.send_chat_text(event, reply)
         except Exception:
             log.exception("chat reply failed")

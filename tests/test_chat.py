@@ -47,6 +47,28 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         self.patcher = patch.object(caller, "think", self.think)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
+        # Saved conversations and Claude's transcripts live in a temporary folder.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        for sid in ("session-1", "old-session"):
+            (self.tmp / f"{sid}.jsonl").write_text("{}")
+        for name, value in (("CHAT_FILE", self.tmp / "chat.json"), ("history_dir", lambda: self.tmp)):
+            p = patch.object(caller, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def test_memory_survives_restart_until_new(self):
+        await self.a.on_message(event("My name is Sara"))
+        self.assertEqual(caller.load_chat_session(), "session-1")  # what a restarted assistant reads
+        await self.a.on_message(event("/new"))
+        self.assertIsNone(caller.load_chat_session())
+
+    async def test_missing_transcript_starts_fresh(self):
+        self.a.chat_session_id = "cleaned-up"  # its file was removed by the storage limit
+        await self.a.on_message(event("hello"))
+        self.assertIsNone(self.think.await_args.args[1])
+        self.assertEqual(self.a.chat_session_id, "session-1")
 
     async def test_memory_typing_and_reset(self):
         await self.a.on_message(event("My name is Sara"))
