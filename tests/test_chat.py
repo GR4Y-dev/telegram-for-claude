@@ -163,19 +163,26 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         await self.a.on_message(event("/update"))
         self.a.start_updates.assert_awaited_once()
 
+    async def test_reply_markdown_bold_is_removed(self):
+        self.think.return_value = ("It is **sunny** today", "session-1")
+        ev = event("weather?")
+        await self.a.on_message(ev)
+        self.assertEqual(ev.reply.await_args.args[0], "It is sunny today")
+
     async def test_backpressure(self):
         self.a.chat_pending = 10
         await self.a.on_message(event("hi"))
         self.think.assert_not_awaited()
         self.assertEqual(self.a.chat_pending, 10)
 
-    async def test_saved_facts_are_explicit_and_reset_cached_context(self):
+    async def test_saved_facts_are_explicit_and_forget_resets_context(self):
         self.a.chat_session_id = "old-session"
         await self.a.on_message(event("Remember that I like **tea**"))
         self.think.assert_not_awaited()
-        self.assertIsNone(self.a.chat_session_id)
+        self.assertEqual(self.a.chat_session_id, "old-session")  # saving a fact keeps the chat
         self.assertEqual(self.a.store.memories(7)[0]["text"], "I like **tea**")
         await self.a.on_message(event("What should I drink?"))
+        self.assertEqual(self.think.await_args.args[1], "old-session")
         self.assertIn("I like **tea**", self.think.await_args.kwargs["context"])
         await self.a.on_message(event("/forget 1"))
         self.assertEqual(self.a.store.memories(7), [])

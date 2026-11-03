@@ -30,10 +30,11 @@ server or a guarantee against every vulnerability.
   parameterized SQL, bounded storage, private file creation and atomic session writes.
   Session IDs are validated before being used as filenames; invalid state starts fresh.
   No routine transcript/reply logging, raw provider failure text or HTTP request URL logging.
-  Normal chat responses preserve literal characters instead of stripping `**`.
+  Command responses and saved facts keep literal characters; only Claude's Markdown bold
+  (`**`) is removed from chat replies so it doesn't show as stars.
 - **Forwarded content:** forwarded text and voice cannot invoke the deterministic command
-  parser. Saved facts are supplied as reference data. Changing facts resets the active
-  text session, and changes to a call's supplied facts reset that call's session next turn.
+  parser. Saved facts are supplied as reference data. Forgetting a fact resets the active
+  text session (new facts reach the next turn without a reset), and changes to a call's supplied facts reset that call's session next turn.
 
 ## Validation and reproducibility
 

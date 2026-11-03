@@ -702,9 +702,11 @@ class Assistant:
 
     async def personal_command(self, text):
         async with self.state_lock:
-            before = self.store.memories(self.owner_id)
+            before = {m["id"] for m in self.store.memories(self.owner_id)}
             response = handle_command(self.store, self.owner_id, text, TZ, datetime.now(timezone.utc))
-            if response is not None and before != self.store.memories(self.owner_id):
+            # New facts arrive with every turn. Only a forgotten one needs a fresh conversation,
+            # because the resumed one could still contain it.
+            if response is not None and before - {m["id"] for m in self.store.memories(self.owner_id)}:
                 self.save_chat_session(None)
             return response
 
@@ -792,7 +794,8 @@ class Assistant:
                     if not reply:
                         raise RuntimeError("Claude returned an empty reply")
                     self.save_chat_session(session)
-                    await self.send_chat_text(event, reply)
+                    # Plain text: Claude's Markdown bold would show as stars.
+                    await self.send_chat_text(event, reply.replace("**", ""))
         except Exception:
             log.exception("chat reply failed")
             await event.reply("Sorry, I couldn't answer just now. Please try again. "
