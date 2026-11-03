@@ -11,11 +11,12 @@ check() { if eval "$1"; then ok=$((ok + 1)); echo "ok - $2"; else echo "FAIL: $2
 # Stand-ins: they only write down that they were called.
 mkdir -p "$T/bin" "$T/outbox"
 for c in docker systemctl; do printf '#!/bin/sh\necho "%s $*" >> "%s/calls.log"\n' "$c" "$T" > "$T/bin/$c"; done
+printf '[ ! -f "%s/docker-fails" ]\n' "$T" >> "$T/bin/docker"   # touch it to make a build fail
 printf '#!/bin/sh\n[ -f "%s/checks.json" ] && cat "%s/checks.json" || exit 22\n' "$T" "$T" > "$T/bin/curl"
 command -v flock >/dev/null || printf '#!/bin/sh\nexit 0\n' > "$T/bin/flock"
 if ! python3 -c "" 2>/dev/null; then printf '#!/bin/sh\nexec python "$@"\n' > "$T/bin/python3"; fi
 chmod +x "$T/bin/"*
-export PATH="$T/bin:$PATH" OUTBOX_DIR="$T/outbox"
+export PATH="$T/bin:$PATH" OUTBOX_DIR="$T/outbox" LOCK_DIR="$T"
 results() { echo "{\"check_runs\": [{\"name\": \"tests\", \"app\": {\"slug\": \"github-actions\"}, \"status\": \"$1\", \"conclusion\": $2}]}" > "$T/checks.json"; }
 
 # "GitHub", a developer's copy, and the server's copy.
@@ -63,5 +64,13 @@ bash "$S/update.sh" >/dev/null
 check '[ -f "$S/notes.txt" ] && [ "$(git -C "$S" rev-parse HEAD)" = "$(git -C "$T/dev" rev-parse HEAD)" ]' "a version whose tests passed is installed"
 check 'grep -q docker "$T/calls.log"' "it's rebuilt and restarted: $(tr '\n' ';' < "$T/calls.log")"
 check '[[ "$(newest)" == *"$TITLE updated"*"Add reactions"* ]]' "you're told what changed"
+check '[ -f "$T/claude-updates.lock" ]' "projects take turns through a shared lock"
+
+release "Add polls"; touch "$T/docker-fails"; rm -f "$T"/outbox/*
+bash "$S/update.sh" >/dev/null 2>&1 || true
+check '! grep -q "Add polls" "$S/notes.txt" && [[ "$(newest)" == *"failed; the next update will try again"* ]]' \
+  "a failed install goes back to the previous version"
+rm -f "$T/docker-fails"; bash "$S/update.sh" >/dev/null
+check 'grep -q "Add polls" "$S/notes.txt" && [[ "$(newest)" == *"Add polls"* ]]' "the next update installs it after all"
 
 echo; echo "ALL $ok CHECKS PASSED"

@@ -180,6 +180,8 @@ You don't need to log in to the server for updates:
   passed. Turn it on or off later with `bash update.sh --install` / `bash update.sh --uninstall`.
 - **Right now:** send `/update` to your assistant's account, or ask Claude "update the server".
 - **Either way,** your assistant texts you the result: what changed, or why it didn't update.
+- **If an update fails** (for example, the disk is full), it goes back to the version it had
+  and tries again at the next update. Projects on the same server update one at a time.
 
 By hand, on the server: `cd /opt/telegram-for-claude && bash update.sh` (or after a manual
 `git pull`, `bash update.sh --now`). Your settings and logins are always kept.
