@@ -995,11 +995,11 @@ class Assistant:
                 await call.close()
             finally:
                 self.call = None
-            if not call.ended.is_set():
-                try:
-                    await self.calls.leave_call(chat_id)
-                except Exception:
-                    pass
+                if not call.ended.is_set():
+                    try:
+                        await asyncio.wait_for(self.calls.leave_call(chat_id), 5)
+                    except Exception:
+                        pass
             log.info("call ended")
             try:
                 trim_storage()

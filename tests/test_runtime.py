@@ -117,6 +117,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             VoiceWorker("missing", "../../other")
 
+    async def test_cleanup_error_still_releases_the_call_and_leaves_telegram(self):
+        assistant = object.__new__(caller.Assistant)
+        assistant.calls = SimpleNamespace(record=AsyncMock(),leave_call=AsyncMock())
+        assistant.memory_context = lambda: ""
+        call = SimpleNamespace(persian=False,converse=AsyncMock(),ended=asyncio.Event(),
+                               close=AsyncMock(side_effect=RuntimeError("cleanup")))
+        with patch.object(caller,"Call",return_value=call):
+            with self.assertRaises(RuntimeError):
+                await assistant.talk(7,"hello",False)
+        self.assertIsNone(assistant.call)
+        assistant.calls.leave_call.assert_awaited_once_with(7)
+
 
 class ModelTests(unittest.TestCase):
     def test_bad_download_keeps_existing_file(self):
