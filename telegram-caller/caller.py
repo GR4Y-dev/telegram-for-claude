@@ -67,6 +67,7 @@ KOKORO_MODEL = os.environ.get("KOKORO_MODEL", "fp32")
 KOKORO_THREADS = max(1, min(2, int(os.environ.get("KOKORO_THREADS", "2"))))
 CLAUDE_CALL_PROCESS = os.environ.get("CLAUDE_CALL_PROCESS", "stream")
 BARGE_IN = os.environ.get("BARGE_IN", "1") == "1"
+OPENING_GRACE_SECONDS = float(os.environ.get("OPENING_GRACE_SECONDS", "1.5"))
 VAD_MODE = os.environ.get("VAD_MODE", "webrtc")
 PERSONA = os.environ.get("PERSONA", "").strip().lower()       # "jarvis" or empty
 JARVIS_ADDRESS = os.environ.get("JARVIS_ADDRESS", "sir").strip()  # how Jarvis addresses you
@@ -228,6 +229,7 @@ class Listener:
 
     def stop(self):
         self.active = False
+        self.speech_started.clear()
         self._reset()
         self._incoming.clear()
 
@@ -534,15 +536,36 @@ class Call:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def say(self, text: str):
+    async def say(self, text: str, opening: bool = False):
         self.ear.stop()
-        if BARGE_IN:
+        playing = asyncio.Event()
+        listen_later = None
+        if BARGE_IN and opening:
+            # The voice loads on demand, so the first words can take a few seconds. A "hello?"
+            # in that silence must not count as interrupting a greeting that hasn't played yet.
+            async def listen_soon():
+                await playing.wait()
+                await asyncio.sleep(OPENING_GRACE_SECONDS)
+                self.ear.start()
+            listen_later = asyncio.create_task(listen_soon())
+        elif BARGE_IN:
             self.ear.start()
+        started = time.monotonic()
         async def speak():
             # Long scheduled call openings keep every word without oversized TTS buffers.
             for start in range(0, len(text), 600):
-                await self.play_pcm(await self.synthesize(text[start:start + 600]))
-        completed = await self.wait_playback(asyncio.create_task(speak()))
+                pcm = await self.synthesize(text[start:start + 600])
+                if not playing.is_set():
+                    if opening:
+                        log.info("call opening audio after %.1fs", time.monotonic() - started)
+                    playing.set()
+                await self.play_pcm(pcm)
+        try:
+            completed = await self.wait_playback(asyncio.create_task(speak()))
+        finally:
+            if listen_later and not listen_later.done():
+                listen_later.cancel()
+                await asyncio.gather(listen_later, return_exceptions=True)
         if completed or not BARGE_IN:
             self.ear.start()
 
@@ -662,7 +685,7 @@ class Call:
     async def converse(self, opening: str):
         try:
             async with asyncio.timeout(MAX_CALL_MINUTES * 60):
-                await self.say(opening)
+                await self.say(opening, opening=True)
                 while not self.ended.is_set():
                     pcm = await self.next_turn(QUIET_HANGUP_SECONDS)
                     if self.ended.is_set():

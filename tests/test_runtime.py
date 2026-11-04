@@ -79,6 +79,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.ear.turns.get_nowait(), b"new speech")
         await call.close()
 
+    async def test_hello_while_voice_loads_does_not_cut_the_greeting(self):
+        sent = []
+        async def send_frame(_chat, _device, chunk):
+            sent.append(chunk)
+        call = caller.Call(SimpleNamespace(send_frame=send_frame), 1)
+        loading = asyncio.Event()
+        async def slow_voice(_text):
+            await loading.wait()
+            return b"\1" * caller.FRAME_BYTES * 3
+        call.synthesize = slow_voice
+        with patch.object(caller, "BARGE_IN", True):
+            task = asyncio.create_task(call.say("Hello, how can I help?", opening=True))
+            await asyncio.sleep(.02)
+            # The owner says "hello?" while the voice is still loading.
+            self.assertFalse(call.ear.active)
+            loud = (b"\xff\x7f\x01\x80" * (caller.FRAME_BYTES // 4))
+            for _ in range(60):
+                call.ear.feed(loud)
+            self.assertFalse(call.ear.speech_started.is_set())
+            loading.set()
+            await asyncio.wait_for(task, 2)
+        self.assertEqual(len(sent), 3)
+        self.assertTrue(call.ear.active)
+        await call.close()
+
     async def test_incoming_call_slot_reserved_before_answer_await(self):
         assistant = object.__new__(caller.Assistant)
         assistant.owner_id, assistant.call, assistant.call_job = 7, None, None
