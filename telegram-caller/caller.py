@@ -12,6 +12,7 @@ free voices, Persian and English). While it thinks you hear a soft tick.
 """
 
 import asyncio
+import faulthandler
 import io
 import json
 import logging
@@ -776,8 +777,12 @@ class Assistant:
         elif self.call or getattr(self, "call_job", None):
             await event.reply("I'm already on a call with you.")
         else:
-            self.launch_call(self.place_call, rest)
-            await self.delete_quietly(event)
+            async def delete_then_call():
+                # Outgoing calls crashed the call library on answer once the deletion
+                # overlapped the call setup; finish deleting first, as before.
+                await self.delete_quietly(event)
+                await self.place_call(rest)
+            self.launch_call(delete_then_call)
 
     async def send_chat_text(self, event, text):
         # 2,000 code points also fit Telegram's 4,096 UTF-16-unit limit with emoji.
@@ -1064,6 +1069,8 @@ class Assistant:
 
 
 if __name__ == "__main__":
+    # If the native call library crashes, the log shows which Python step was running.
+    faulthandler.enable(all_threads=True)
     # The call library grabs the current event loop when it's created, so the loop
     # has to exist first.
     loop = asyncio.new_event_loop()
@@ -1072,7 +1079,8 @@ if __name__ == "__main__":
     if os.name == "posix":
         # A normal service stop must await guest-container cleanup before exiting.
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(assistant.client.disconnect()))
+            # Telethon's disconnect() returns a Future here, not a coroutine.
+            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(assistant.client.disconnect()))
     try:
         loop.run_until_complete(assistant.run())
     finally:
