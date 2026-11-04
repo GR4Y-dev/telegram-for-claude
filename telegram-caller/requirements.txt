@@ -1,4 +1,6 @@
 py-tgcalls==3.0.0
+# 3.0.6 fixes a native crash when the other person answers an outgoing private call.
+ntgcalls==3.0.6
 telethon==1.45.0
 edge-tts==7.3.1
 kokoro-onnx==0.6.1
