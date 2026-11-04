@@ -60,16 +60,27 @@ sent to Telegram, provider history or backups. Quota/approval records stay in th
 ## One-time setup on the Linux server
 
 This feature intentionally refuses to run without isolation. It does not borrow the
-owner's xWriter wrapper or entire login folder. An administrator should:
+owner's xWriter wrapper or entire login folder. As root, run one command:
 
-1. Locate the **existing native Linux Claude 2.1.286 binary**. Keep the owner's `CLAUDE_BIN`
-   wrapper unchanged. Setup checks the ELF header and exact version; it never upgrades it.
-2. Generate a separate long-lived token using that binary's `setup-token` command.
-3. In `telegram-caller`, run `bash setup-guests.sh /absolute/path/to/native/claude`.
-   It builds a small Debian runtime, asks for the token with hidden input, stores it in
-   private `data/guest-auth.json`, adds guest settings to `.env`, and restarts the caller.
-   The token is never placed in command arguments or the image.
+```bash
+bash /opt/telegram-for-claude/telegram-caller/setup-guests.sh
+```
+
+1. It finds the **existing native Linux Claude 2.1.286 program** by itself (behind the
+   owner's wrapper, such as xWriter's copy) and checks it is a real binary of that exact
+   version. It never upgrades it or changes the owner's `CLAUDE_BIN` wrapper. If it can't
+   find one, pass the path: `bash setup-guests.sh /absolute/path/to/native/claude`.
+2. It runs that program's `setup-token`: open the link it shows, approve, and paste the
+   code back. This makes a separate long-lived login on the same Claude account, so guests
+   never use the owner's session. The token is read from a private temporary recording,
+   which is wiped straight away, and the screen is cleared. It is saved only in private
+   `data/guest-auth.json`, never in command arguments, shell history or the image. If it
+   can't be read automatically, the script asks you to paste it (hidden input).
+3. It builds a small Debian runtime, adds guest settings to `.env` and restarts the caller.
 4. Approve a test account, check text/voice/call behavior, then revoke it and verify silence.
+
+Guest usage counts toward the owner's Claude plan. Running the script again reuses the
+saved login; delete `data/guest-auth.json` first to sign in again.
 
 For a dedicated API key instead, the private JSON file may contain exactly one field,
 `ANTHROPIC_API_KEY`. The default uses `CLAUDE_CODE_OAUTH_TOKEN`. The file must be owned by
