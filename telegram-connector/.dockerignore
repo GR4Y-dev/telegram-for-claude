@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!requirements.txt
+!server.py
+!login.py

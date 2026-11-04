@@ -5,3 +5,4 @@ kokoro-onnx==0.6.1
 httpx
 numpy
 tzdata
+webrtcvad-wheels==2.0.14.post1

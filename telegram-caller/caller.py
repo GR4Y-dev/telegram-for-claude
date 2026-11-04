@@ -40,6 +40,9 @@ from telethon.sessions import StringSession
 
 from assistant_store import Store
 from assistant_commands import handle_command
+from claude_stream import Conversation, StreamUnavailable, read_turn
+from processes import drain, stop
+from voice_worker import VoiceWorker
 
 # ---------------------------------------------------------------- settings
 BASE = Path(__file__).resolve().parent
@@ -57,6 +60,11 @@ VOICE_EN = os.environ.get("VOICE_EN", "en-US-AvaMultilingualNeural")
 TTS_EN = os.environ.get("TTS_EN", "edge").strip().lower()      # "edge" or "kokoro"
 KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "bm_lewis")
 KOKORO_DIR = Path(os.environ.get("KOKORO_DIR", BASE / "models"))
+KOKORO_MODEL = os.environ.get("KOKORO_MODEL", "fp32")
+KOKORO_THREADS = max(1, min(2, int(os.environ.get("KOKORO_THREADS", "2"))))
+CLAUDE_CALL_PROCESS = os.environ.get("CLAUDE_CALL_PROCESS", "stream")
+BARGE_IN = os.environ.get("BARGE_IN", "1") == "1"
+VAD_MODE = os.environ.get("VAD_MODE", "webrtc")
 PERSONA = os.environ.get("PERSONA", "").strip().lower()       # "jarvis" or empty
 JARVIS_ADDRESS = os.environ.get("JARVIS_ADDRESS", "sir").strip()  # how Jarvis addresses you
 TZ = ZoneInfo(os.environ.get("TIMEZONE", "UTC"))
@@ -161,6 +169,7 @@ def greeting() -> tuple[str, bool]:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("pytgcalls").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 log = logging.getLogger("telegram-caller")
 
 PERSIAN = re.compile(r"[؀-ۿ]")
@@ -185,36 +194,58 @@ class Listener:
     """Collects what the caller says and cuts it into turns at the pauses."""
 
     def __init__(self):
-        self.turns: asyncio.Queue[bytes] = asyncio.Queue()
+        self.turns: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2)
         self.active = False
         self.noise = 300.0
         self.last_heard = time.monotonic()
         self._pre: deque[bytes] = deque(maxlen=25)   # keeps the start of the first word
+        self.vad = None
+        if VAD_MODE == "webrtc":
+            try:
+                import webrtcvad
+                self.vad = webrtcvad.Vad(2)
+            except ImportError:
+                log.warning("WebRTC VAD unavailable; using energy detection")
+        self.speech_started = asyncio.Event()
+        self._incoming = bytearray()
         self._reset()
 
     def _reset(self):
         self._buf = bytearray()
         self._speech_ms = 0.0
+        self._continuous_ms = 0.0
         self._quiet_ms = 0.0
         self._pre.clear()
 
     def start(self):
         self._reset()
+        self.speech_started.clear()
+        self._incoming.clear()
         self.active = True
 
     def stop(self):
         self.active = False
         self._reset()
+        self._incoming.clear()
 
     def feed(self, pcm: bytes):
         if not self.active or not pcm:
             return
+        self._incoming.extend(pcm)
+        while len(self._incoming) >= FRAME_BYTES:
+            frame = bytes(self._incoming[:FRAME_BYTES])
+            del self._incoming[:FRAME_BYTES]
+            self._feed_frame(frame)
+
+    def _feed_frame(self, pcm):
         samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
         if samples.size == 0:
             return
         ms = samples.size * 1000 / RATE
         level = float(np.sqrt(np.mean(samples * samples)))
         loud = level > max(3 * self.noise, 400)
+        if self.vad is not None:
+            loud = loud and self.vad.is_speech(pcm, RATE)
         if not self._buf and not loud:
             self.noise = 0.95 * self.noise + 0.05 * max(level, 50)
             self._pre.append(pcm)
@@ -223,15 +254,22 @@ class Listener:
             if not self._buf:
                 self._buf.extend(b"".join(self._pre))
             self._speech_ms += ms
+            self._continuous_ms += ms
+            if self._continuous_ms >= 350:
+                self.speech_started.set()
             self._quiet_ms = 0
             self.last_heard = time.monotonic()
         else:
             self._quiet_ms += ms
+            if self._quiet_ms >= 100:
+                self._continuous_ms = 0
         self._buf.extend(pcm)
         too_long = len(self._buf) >= MAX_TURN_SECONDS * RATE * 2
         if self._quiet_ms >= END_OF_TURN_MS or too_long:
             if self._speech_ms >= MIN_SPEECH_MS:
-                self.turns.put_nowait(bytes(self._buf))
+                if not self.turns.full():
+                    self.turns.put_nowait(bytes(self._buf))
+                log.debug("call end_of_turn_silence_ms=%.0f", self._quiet_ms)
             self._reset()
 
 
@@ -318,12 +356,8 @@ def split_sentences(buf: str) -> tuple[list[str], str]:
     return done, buf
 
 
-async def think(text: str, session_id: str | None,
-                sentences: asyncio.Queue | None = None, *,
-                chat: bool = False, context: str = "", actions: bool = True) -> tuple[str, str | None]:
-    """Ask Claude Code for the answer. Each sentence goes into `sentences` as soon as
-    Claude has written it, so speaking can start early. Returns (whole reply, session id
-    for the next turn)."""
+def claude_args(session_id=None, *, chat=False, actions=True):
+    """One policy builder shared by persistent and one-shot owner conversations."""
     args = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages", "--settings", '{"alwaysThinkingEnabled": false}',
             "--tools", "WebSearch,WebFetch", "--setting-sources", "",
@@ -342,119 +376,105 @@ async def think(text: str, session_id: str | None,
         args += ["--mcp-config", CLAUDE_MCP_CONFIG]
     if allowed_tools(chat and actions):
         args += ["--allowedTools", allowed_tools(chat and actions)]
+    return args
+
+
+def turn_context(text, context=""):
+    return time_context() + ("\n" + context if context else "") + "\n\nUser message:\n" + text
+
+
+async def think(text: str, session_id: str | None,
+                sentences: asyncio.Queue | None = None, *,
+                chat: bool = False, context: str = "", actions: bool = True) -> tuple[str, str | None]:
+    args = claude_args(session_id, chat=chat, actions=actions)
     workdir = BASE / "workdir"
     workdir.mkdir(exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
         *args, cwd=workdir, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, limit=16 * 1024 * 1024)
-    # Put changing time/facts in each turn, not only a potentially cached system prompt.
-    turn = time_context() + ("\n" + context if context else "") + "\n\nUser message:\n" + text
-    proc.stdin.write(turn.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    buf, full, result = "", "", None
-
-    def emit(pieces):
-        for p in pieces:
-            p = p.replace("[END]", "").strip()
-            if p and sentences is not None:
-                sentences.put_nowait(p)
-
-    async def read():
-        nonlocal buf, full, result, session_id
-        async for line in proc.stdout:
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            session_id = event.get("session_id") or session_id
-            if event.get("type") == "result":
-                result = event
-            if event.get("type") != "stream_event":
-                continue
-            inner = event.get("event") or {}
-            delta = inner.get("delta") or {}
-            if inner.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-                full += delta.get("text", "")
-                buf += delta.get("text", "")
-                ready, buf = split_sentences(buf)
-                emit(ready)
-            elif inner.get("type") == "content_block_stop" and buf.strip():
-                emit([buf])  # e.g. "Let me check, sir." before a web search
-                buf = ""
-
-    # Drain stderr concurrently so a verbose subprocess cannot block on a full pipe.
-    stderr_task = asyncio.create_task(proc.stderr.read())
+        stderr=asyncio.subprocess.PIPE, limit=1024 * 1024, start_new_session=os.name == "posix")
+    stderr = asyncio.create_task(drain(proc.stderr))
     try:
-        await asyncio.wait_for(read(), CLAUDE_TIMEOUT)
-        await asyncio.wait_for(proc.wait(), 10)
-    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        async with asyncio.timeout(CLAUDE_TIMEOUT):
+            proc.stdin.write(turn_context(text, context).encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+            reply, sid = await read_turn(proc.stdout, sentences)
+            await asyncio.wait_for(proc.wait(), 10)
+            return reply, sid or session_id
+    except asyncio.TimeoutError:
+        raise RuntimeError("Claude took too long") from None
+    finally:
         if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
-        await stderr_task
-        if isinstance(exc, asyncio.CancelledError):
-            raise
-        raise RuntimeError("Claude took too long") from exc
-    emit([buf])
-    await stderr_task
-    if result is None or result.get("is_error"):
-        # Provider output can quote messages or secret connector URLs. Keep it out of logs.
-        raise RuntimeError(f"Claude failed (exit {proc.returncode}); check login and usage.")
-    return (result.get("result") or full).strip(), session_id
+            await stop(proc)
+        stderr.cancel()
+        await asyncio.gather(stderr, return_exceptions=True)
 
 
 # ---------------------------------------------------------------- speaking
-_kokoro = None
-
-
-def load_kokoro():
-    """Load Kokoro once (it takes a moment and stays in memory)."""
-    global _kokoro
-    if _kokoro is None:
-        from kokoro_onnx import Kokoro
-        _kokoro = Kokoro(str(KOKORO_DIR / "kokoro-v1.0.onnx"), str(KOKORO_DIR / "voices-v1.0.bin"))
-    return _kokoro
-
-
 async def _to_call_audio(data: bytes, *input_format: str) -> bytes:
-    """Any audio to the call's 48 kHz mono PCM, with ffmpeg."""
+    """Bounded decoding; a cancelled call must not leave ffmpeg running."""
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-loglevel", "error", *input_format, "-i", "pipe:0", "-f", "s16le", "-ac", "1",
-        "-ar", str(RATE), "pipe:1",
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-    pcm, _ = await proc.communicate(data)
-    return pcm
+        "ffmpeg", "-loglevel", "error", "-protocol_whitelist", "pipe", *input_format,
+        "-i", "pipe:0", "-t", "90",
+        "-f", "s16le", "-ac", "1", "-ar", str(RATE), "pipe:1",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix")
+    try:
+        pcm, _ = await asyncio.wait_for(proc.communicate(data), 30)
+        if proc.returncode:
+            raise RuntimeError("Audio conversion failed")
+        return pcm
+    finally:
+        if proc.returncode is None:
+            await stop(proc)
 
 
-async def speech(text: str) -> bytes:
-    """Text to 48 kHz mono PCM: Kokoro on this server for English (when TTS_EN=kokoro),
-    otherwise Microsoft's free voices."""
-    persian = is_persian(text)
-    if not persian and TTS_EN == "kokoro":
-        lang = "en-gb" if KOKORO_VOICE.startswith("b") else "en-us"
-        samples, rate = await asyncio.to_thread(load_kokoro().create, text,
-                                                voice=KOKORO_VOICE, lang=lang)
-        pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes()
-        return await _to_call_audio(pcm, "-f", "s16le", "-ar", str(rate), "-ac", "1")
+async def speech(text: str, worker=None) -> bytes:
+    """English local speech runs outside the long-lived assistant process."""
+    if not is_persian(text) and TTS_EN == "kokoro":
+        owned = worker is None
+        worker = worker or VoiceWorker(KOKORO_DIR, KOKORO_MODEL, KOKORO_THREADS)
+        try:
+            lang = "en-gb" if KOKORO_VOICE.startswith("b") else "en-us"
+            pcm, rate = await worker.create(text, KOKORO_VOICE, lang)
+            return await _to_call_audio(pcm, "-f", "s16le", "-ar", str(rate), "-ac", "1")
+        finally:
+            if owned:
+                await worker.close()
     mp3 = bytearray()
-    async for chunk in edge_tts.Communicate(text, VOICE_FA if persian else VOICE_EN).stream():
-        if chunk["type"] == "audio":
-            mp3.extend(chunk["data"])
+    async with asyncio.timeout(45):
+        async for chunk in edge_tts.Communicate(text, VOICE_FA if is_persian(text) else VOICE_EN).stream():
+            if chunk["type"] == "audio":
+                mp3.extend(chunk["data"])
+                if len(mp3) > 8 * 1024 * 1024:
+                    raise RuntimeError("Speech output exceeded the limit")
     return await _to_call_audio(bytes(mp3))
 
 
 class Call:
     def __init__(self, calls: PyTgCalls, chat_id: int, memory_context=None):
-        self.calls = calls
-        self.chat_id = chat_id
+        self.calls, self.chat_id = calls, chat_id
         self.ear = Listener()
         self.ended = asyncio.Event()
-        self.session_id: str | None = None
+        self.session_id = None
         self.persian = True
-        self.memory_context = memory_context
-        self._memory_snapshot = None
+        self.memory_context, self._memory_snapshot = memory_context, None
+        self.conversation = None
+        self.voice = VoiceWorker(KOKORO_DIR, KOKORO_MODEL, KOKORO_THREADS)
+        self.stream_disabled = False
+
+    async def close(self):
+        conversation, self.conversation = self.conversation, None
+        try:
+            if conversation:
+                await conversation.close()
+        finally:
+            try:
+                await self.voice.close()
+            finally:
+                self.ear.stop()
+                while not self.ear.turns.empty():
+                    self.ear.turns.get_nowait()
 
     async def play_pcm(self, pcm: bytes):
         loop = asyncio.get_running_loop()
@@ -462,21 +482,44 @@ class Call:
         for i in range(0, len(pcm), FRAME_BYTES):
             if self.ended.is_set():
                 return
-            chunk = pcm[i:i + FRAME_BYTES]
-            if len(chunk) < FRAME_BYTES:
-                chunk += b"\x00" * (FRAME_BYTES - len(chunk))
-            await self.calls.send_frame(self.chat_id, Device.MICROPHONE, chunk)
+            chunk = pcm[i:i + FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
+            await asyncio.wait_for(self.calls.send_frame(self.chat_id, Device.MICROPHONE, chunk), 3)
             next_at += 0.01
-            delay = next_at - loop.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
+            await asyncio.sleep(max(0, next_at - loop.time()))
+
+    async def synthesize(self, text):
+        started = time.monotonic()
+        result = await speech(text, self.voice) if TTS_EN == "kokoro" else await speech(text)
+        log.debug("call synthesis_ms=%.0f", (time.monotonic() - started) * 1000)
+        return result
+
+    async def wait_playback(self, playback):
+        """Return True only if playback completed, not if the caller interrupted it."""
+        end = asyncio.create_task(self.ended.wait())
+        barge = asyncio.create_task(self.ear.speech_started.wait()) if BARGE_IN else None
+        tasks = [playback, end] + ([barge] if barge else [])
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if end in done or (barge and barge in done):
+                return False
+            await playback
+            return True
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def say(self, text: str):
         self.ear.stop()
-        try:
-            await self.play_pcm(await speech(text))
-            await asyncio.sleep(0.3)
-        finally:
+        if BARGE_IN:
+            self.ear.start()
+        async def speak():
+            # Long scheduled call openings keep every word without oversized TTS buffers.
+            for start in range(0, len(text), 600):
+                await self.play_pcm(await self.synthesize(text[start:start + 600]))
+        completed = await self.wait_playback(asyncio.create_task(speak()))
+        if completed or not BARGE_IN:
             self.ear.start()
 
     async def ticking(self):
@@ -485,108 +528,149 @@ class Call:
             await asyncio.sleep(1.8)
 
     async def next_turn(self, timeout: float) -> bytes | None:
-        get = asyncio.ensure_future(self.ear.turns.get())
-        end = asyncio.ensure_future(self.ended.wait())
-        done, _ = await asyncio.wait({get, end}, timeout=timeout,
-                                     return_when=asyncio.FIRST_COMPLETED)
-        for t in (get, end):
-            if t not in done:
-                t.cancel()
-        return get.result() if get in done else None
+        get = asyncio.create_task(self.ear.turns.get())
+        end = asyncio.create_task(self.ended.wait())
+        try:
+            done, _ = await asyncio.wait({get, end}, timeout=timeout,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            return get.result() if get in done else None
+        finally:
+            for task in (get, end):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(get, end, return_exceptions=True)
 
     def words(self, fa: str, en: str) -> str:
         return fa if self.persian else en
 
-    async def respond(self, heard: str) -> bool:
-        """Think and speak at the same time: Claude writes, each finished sentence is
-        turned into speech while the one before it plays. Returns True to end the call."""
-        sentences: asyncio.Queue = asyncio.Queue()
-        audio: asyncio.Queue = asyncio.Queue()
-        made = 0
-
-        async def thinking() -> bool:
+    async def model_turn(self, heard, sentences):
+        context = self.memory_context() if self.memory_context else ""
+        if context != self._memory_snapshot:
+            if self.conversation:
+                await self.conversation.close()
+                self.conversation = None
+            self.session_id, self._memory_snapshot = None, context
+        if CLAUDE_CALL_PROCESS == "stream" and not self.stream_disabled:
+            workdir = BASE / "workdir"
+            workdir.mkdir(exist_ok=True)
+            if self.conversation is None:
+                self.conversation = Conversation(claude_args(self.session_id), workdir, CLAUDE_TIMEOUT)
             try:
-                context = self.memory_context() if self.memory_context else ""
-                if context != self._memory_snapshot:
-                    self.session_id = None
-                    self._memory_snapshot = context
-                kwargs = {"context": context} if context else {}
-                reply, self.session_id = await think(heard, self.session_id, sentences, **kwargs)
-                log.debug("call reply generated")
+                return await self.conversation.ask(turn_context(heard, context), sentences)
+            except StreamUnavailable:
+                # No protocol output was observed; never retry a partially executed turn.
+                self.stream_disabled = True
+                self.conversation = None
+                log.warning("call stream unavailable; using per-turn mode")
+        kwargs = {"context": context} if context else {}
+        return await think(heard, self.session_id, sentences, **kwargs)
+
+    async def respond(self, heard: str) -> bool:
+        sentences, audio = asyncio.Queue(maxsize=8), asyncio.Queue(maxsize=2)
+        made = 0
+        started = time.monotonic()
+        if BARGE_IN:
+            self.ear.start()
+
+        async def thinking():
+            try:
+                reply, self.session_id = await self.model_turn(heard, sentences)
                 return "[END]" in reply
-            except Exception as e:
-                log.warning("thinking failed: %s", e)
+            except Exception as exc:
+                log.warning("thinking failed (%s)", type(exc).__name__)
                 if not made and sentences.empty():
-                    sentences.put_nowait(self.words(
+                    await sentences.put(self.words(
                         "ببخشید، الان نتونستم جواب بدم. دوباره امتحان کن.",
                         "Sorry, I couldn't come up with an answer. Try again?"))
                 return False
             finally:
-                sentences.put_nowait(None)
+                if not asyncio.current_task().cancelling():
+                    await sentences.put(None)
 
         async def voicing():
             nonlocal made
-            while (text := await sentences.get()) is not None:
-                try:
-                    audio.put_nowait(await speech(text))
-                    made += 1
-                except Exception as e:
-                    log.warning("speech failed: %s", e)
-            audio.put_nowait(None)
+            try:
+                while (text := await sentences.get()) is not None:
+                    try:
+                        await audio.put(await self.synthesize(text))
+                        made += 1
+                    except Exception as exc:
+                        log.warning("speech failed (%s)", type(exc).__name__)
+            finally:
+                if not asyncio.current_task().cancelling():
+                    await audio.put(None)
 
         thinker = asyncio.create_task(thinking())
         voicer = asyncio.create_task(voicing())
         tick = asyncio.create_task(self.ticking())
-        try:
+        async def playback():
+            first = True
             while (pcm := await audio.get()) is not None:
                 if not tick.done():
                     tick.cancel()
                     await asyncio.gather(tick, return_exceptions=True)
+                if first:
+                    log.debug("call first_audio_ms=%.0f", (time.monotonic() - started) * 1000)
+                    first = False
                 await self.play_pcm(pcm)
-                if self.ended.is_set():
-                    break
+
+        completed = False
+        try:
+            completed = await self.wait_playback(asyncio.create_task(playback()))
+            if not completed:
+                return self.ended.is_set()
+            return await thinker
         finally:
-            tick.cancel()
-            if self.ended.is_set():
-                thinker.cancel()
-                voicer.cancel()
-        if self.ended.is_set():
-            return True
-        return await thinker
+            for task in (thinker, voicer, tick):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(thinker, voicer, tick, return_exceptions=True)
+            if not completed:
+                if self.conversation:
+                    await self.conversation.close()
+                    self.conversation = None
+                await self.voice.close()
+            # Never retain queued PCM or sentence text beyond this reply.
+            for queue in (sentences, audio):
+                while not queue.empty():
+                    queue.get_nowait()
 
     async def converse(self, opening: str):
-        started = time.monotonic()
-        await self.say(opening)
-        while not self.ended.is_set():
-            pcm = await self.next_turn(QUIET_HANGUP_SECONDS)
-            if self.ended.is_set():
-                break
-            if pcm is None:
-                await self.say(self.words("صدایی نمیاد، قطع می‌کنم. خداحافظ!",
-                                          "I can't hear you, so I'll hang up. Bye!"))
-                break
-            self.ear.stop()
-            try:
-                heard = await transcribe(pcm)
-            except Exception as e:
-                log.warning("speech-to-text failed: %s", e)
-                await self.say(self.words("ببخشید، نشنیدم. دوباره بگو.",
-                                          "Sorry, I didn't catch that. Say it again?"))
-                continue
-            if not heard:
-                self.ear.start()
-                continue
-            self.persian = is_persian(heard)
-            log.debug("call speech transcribed")
-            done = await self.respond(heard)
-            await asyncio.sleep(0.3)
-            self.ear.start()
-            if done:
-                break
-            if time.monotonic() - started > MAX_CALL_MINUTES * 60:
-                await self.say(self.words("وقت تماس تموم شد. خداحافظ!",
-                                          "We've hit the call time limit. Bye!"))
-                break
+        try:
+            async with asyncio.timeout(MAX_CALL_MINUTES * 60):
+                await self.say(opening)
+                while not self.ended.is_set():
+                    pcm = await self.next_turn(QUIET_HANGUP_SECONDS)
+                    if self.ended.is_set():
+                        break
+                    if pcm is None:
+                        await self.say(self.words("صدایی نمیاد، قطع می‌کنم. خداحافظ!",
+                                                  "I can't hear you, so I'll hang up. Bye!"))
+                        break
+                    self.ear.stop()
+                    started = time.monotonic()
+                    try:
+                        heard = await transcribe(pcm)
+                    except Exception as exc:
+                        log.warning("speech-to-text failed (%s)", type(exc).__name__)
+                        await self.say(self.words("ببخشید، نشنیدم. دوباره بگو.",
+                                                  "Sorry, I didn't catch that. Say it again?"))
+                        continue
+                    finally:
+                        pcm = None
+                        log.debug("call transcription_ms=%.0f", (time.monotonic() - started) * 1000)
+                    if not heard:
+                        self.ear.start()
+                        continue
+                    self.persian = is_persian(heard)
+                    if await self.respond(heard):
+                        break
+                    if not self.ear.active:
+                        self.ear.start()
+        except asyncio.TimeoutError:
+            log.info("call reached its time limit")
+        finally:
+            await self.close()
 
 
 # ---------------------------------------------------------------- the account
@@ -599,6 +683,7 @@ class Assistant:
         self.calls = PyTgCalls(self.client)
         self.owner_id: int | None = None
         self.call: Call | None = None
+        self.call_job = None
         self.chat_session_id = load_chat_session()  # text chat continues where it left off
         self.chat_lock = asyncio.Lock()
         self.chat_pending = 0
@@ -612,11 +697,7 @@ class Assistant:
         owner = await self.client.get_entity(OWNER)
         self.owner_id = owner.id
         self.chat_session_id = load_chat_session(self.owner_id)
-        me = await self.client.get_me()
-        log.info("logged in as %s, owner is %s (%s)", me.first_name, OWNER, self.owner_id)
-        if TTS_EN == "kokoro":
-            await asyncio.to_thread(load_kokoro)  # loaded now so the first answer isn't slow
-            log.info("Kokoro voice %s ready", KOKORO_VOICE)
+        log.info("assistant account connected; owner resolved")
 
         self.client.add_event_handler(self.on_message, events.NewMessage(incoming=True))
         self.calls.on_update(filters.chat_update(ChatUpdate.Status.INCOMING_CALL))(self.on_ring)
@@ -630,6 +711,9 @@ class Assistant:
         try:
             await self.client.run_until_disconnected()
         finally:
+            if self.call_job:
+                self.call_job.cancel()
+                await asyncio.gather(self.call_job, return_exceptions=True)
             for task in workers:
                 task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
@@ -653,11 +737,11 @@ class Assistant:
             await self.start_updates(event)
         elif command == "/new":
             await self.chat_message(event, reset=True)
-        elif self.call:
+        elif self.call or getattr(self, "call_job", None):
             await event.reply("I'm already on a call with you.")
         else:
+            self.launch_call(self.place_call, rest)
             await self.delete_quietly(event)
-            asyncio.create_task(self.place_call(rest))
 
     async def send_chat_text(self, event, text):
         # 2,000 code points also fit Telegram's 4,096 UTF-16-unit limit with emoji.
@@ -813,7 +897,7 @@ class Assistant:
     async def start_updates(self, event):
         """Run every project's update.sh now, each in its own systemd unit so restarting
         this assistant can't stop it. The results come back through the outbox."""
-        if self.call:
+        if self.call or getattr(self, "call_job", None):
             await event.reply("We're on a call. Send /update again after it.")
             return
         projects = sorted(p for p in UPDATES_DIR.glob("*") if p.is_file()) if UPDATES_DIR.exists() else []
@@ -872,11 +956,23 @@ class Assistant:
         await self.talk(chat_id, opening, persian)
 
     async def on_ring(self, _, update: ChatUpdate):
-        if update.chat_id != self.owner_id or self.call:
-            log.info("ignoring a call from %s", update.chat_id)
+        if update.chat_id != self.owner_id or self.call or getattr(self, "call_job", None):
             return
         # The library waits for handlers to finish, so the call runs on its own.
-        asyncio.create_task(self.answer(update.chat_id))
+        self.launch_call(self.answer, update.chat_id)
+
+    def launch_call(self, function, *args):
+        """Reserve the single slot before the first await (including ringing time)."""
+        self.call_target = self.owner_id
+        async def run():
+            try:
+                await function(*args)
+            except Exception as exc:
+                log.warning("call job failed (%s)", type(exc).__name__)
+            finally:
+                self.call_job = None
+                self.call_target = None
+        self.call_job = asyncio.create_task(run())
 
     async def answer(self, chat_id: int):
         try:
@@ -895,12 +991,15 @@ class Assistant:
         except Exception:
             log.exception("call failed")
         finally:
-            self.call = None
-            if not call.ended.is_set():
-                try:
-                    await self.calls.leave_call(chat_id)
-                except Exception:
-                    pass
+            try:
+                await call.close()
+            finally:
+                self.call = None
+                if not call.ended.is_set():
+                    try:
+                        await asyncio.wait_for(self.calls.leave_call(chat_id), 5)
+                    except Exception:
+                        pass
             log.info("call ended")
             try:
                 trim_storage()
@@ -908,8 +1007,12 @@ class Assistant:
                 log.warning("couldn't trim the call history: %s", e)
 
     async def on_hangup(self, _, update: ChatUpdate):
+        # While it's still ringing, play() itself fails (declined, busy, no answer) and the
+        # job texts the message instead; cancelling here would lose that text.
         if self.call and update.chat_id == self.call.chat_id:
             self.call.ended.set()
+            if getattr(self, "call_job", None) and not self.call_job.cancelling():
+                self.call_job.cancel()
 
     async def on_audio(self, _, update: StreamFrames):
         if self.call and update.chat_id == self.call.chat_id:

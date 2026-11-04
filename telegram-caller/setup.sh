@@ -78,17 +78,7 @@ else
   grep -q '^CLAUDE_MODEL=' .env || echo "CLAUDE_MODEL=haiku" >> .env
   grep -q '^STORAGE_LIMIT_MB=' .env || echo "STORAGE_LIMIT_MB=1024" >> .env
 fi
-if grep -q '^TTS_EN=kokoro' .env; then
-  mkdir -p models
-  for f in kokoro-v1.0.onnx voices-v1.0.bin; do
-    if [ ! -s "models/$f" ]; then
-      echo "Downloading Kokoro's $f (once; the model is about 350 MB)..."
-      curl -L --fail --progress-bar -o "models/$f.part" \
-        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/$f"
-      mv "models/$f.part" "models/$f"
-    fi
-  done
-fi
+venv/bin/python models.py --env .env
 # Lets Claude read (never send) your Telegram during calls, through your connector.
 SECRET="$(setting MCP_SECRET "$CONNECTOR/.env")"
 DOMAIN="$(setting DOMAIN "$CONNECTOR/.env")"
