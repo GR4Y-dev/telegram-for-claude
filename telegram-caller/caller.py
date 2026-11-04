@@ -1050,10 +1050,10 @@ class Assistant:
                 log.warning("couldn't trim the call history: %s", e)
 
     async def on_hangup(self, _, update: ChatUpdate):
+        # While it's still ringing, play() itself fails (declined, busy, no answer) and the
+        # job texts the message instead; cancelling here would lose that text.
         if self.call and update.chat_id == self.call.chat_id:
             self.call.ended.set()
-        if ((self.call and update.chat_id == self.call.chat_id)
-                or update.chat_id == getattr(self, "call_target", None)):
             if getattr(self, "call_job", None) and not self.call_job.cancelling():
                 self.call_job.cancel()
 

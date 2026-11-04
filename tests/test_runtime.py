@@ -99,6 +99,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(first, return_exceptions=True)
         self.assertEqual(started, [7])
 
+    async def test_declined_call_still_texts_the_message(self):
+        # py-tgcalls fails play() with CallDeclined, then reports DISCARDED_CALL to on_hangup
+        # before play()'s caller has run. The hang-up must not cancel the fallback text.
+        assistant = object.__new__(caller.Assistant)
+        assistant.owner_id, assistant.call, assistant.call_job = 7, None, None
+        ringing = asyncio.get_running_loop().create_future()
+        assistant.calls = SimpleNamespace(play=lambda *a, **k: ringing)
+        assistant.client = SimpleNamespace(send_message=AsyncMock())
+        assistant.launch_call(assistant.place_call, "Take your medicine")
+        job = assistant.call_job
+        await asyncio.sleep(0)
+        ringing.set_exception(caller.CallDeclined(7))
+        await assistant.on_hangup(None, SimpleNamespace(chat_id=7))
+        await asyncio.gather(job, return_exceptions=True)
+        assistant.client.send_message.assert_awaited_once()
+        self.assertIn("Take your medicine", assistant.client.send_message.await_args.args[1])
+        self.assertIsNone(assistant.call_job)
+
     async def test_memory_change_closes_old_persistent_session(self):
         call = caller.Call(None, 1, memory_context=lambda:"new facts")
         old = SimpleNamespace(close=AsyncMock())
