@@ -181,16 +181,20 @@ class GuestRuntime:
         env = clean_environment() | self.credentials()
         return GuestConversation(self, name, args, folder, env)
 
-    async def clear(self, owner, guest):
-        """Only after cancelling this guest's job; deletion cannot escape its numeric scope."""
-        if any(type(n) is not int or n <= 0 for n in (owner,guest)):
+    async def clear(self, owner, guest, through_generation):
+        """Remove retired histories without touching a concurrent re-grant or reset."""
+        if any(type(n) is not int or n <= 0 for n in (owner, guest, through_generation)):
             raise GuestUnavailable("Invalid guest scope")
         root = self.root.resolve()
         folder = root / str(owner) / str(guest)
         if folder.is_symlink() or folder.parent.is_symlink() or not folder.resolve().is_relative_to(root):
             raise GuestUnavailable("Invalid guest directory")
         if folder.exists():
-            shutil.rmtree(folder)
+            for history in folder.iterdir():
+                if history.name.isdecimal() and int(history.name) <= through_generation:
+                    if history.is_symlink() or not history.resolve().is_relative_to(folder):
+                        raise GuestUnavailable("Invalid guest history directory")
+                    shutil.rmtree(history)
 
 
 class GuestConversation(Conversation):

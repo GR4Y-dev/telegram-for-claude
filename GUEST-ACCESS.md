@@ -109,3 +109,8 @@ No CI test uses a real account or sends Telegram messages.
 Real subscription authentication, voice quality, call audio/echo and server resource
 headroom still need a controlled server smoke test before enabling guests for others.
 See [performance notes](PERFORMANCE.md) for the measured baseline and remaining checks.
+The [read-only measurement helper](tools/measure_resources.py) records process-tree
+RSS/swap, service memory counters, model/venv file totals and selected image byte sizes.
+Run it idle, during a call and after several calls; it never reads message contents,
+environment variables or process arguments. Guest containers need a separate `docker stats`
+sample because they belong to Docker's daemon, not the caller's process tree.

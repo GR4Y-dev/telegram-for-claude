@@ -153,6 +153,24 @@ class GuestTests(unittest.IsolatedAsyncioTestCase):
         await self.a.on_message(event("again"))
         self.assertEqual(self.engine.ask.await_count,1)
 
+    async def test_deny_via_owner_chat_invalidates_before_waiting_for_model(self):
+        started = asyncio.Event()
+        async def finishing(*args):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return "late guest answer", "stale-session"
+        self.engine.ask.side_effect = finishing
+        job = asyncio.create_task(self.a.on_message(event("hello")))
+        await started.wait()
+        self.a.client.send_message.reset_mock()
+        await self.a.on_message(event("/deny 22", sender=7))
+        await asyncio.gather(job, return_exceptions=True)
+        self.a.client.send_message.assert_not_awaited()
+        self.assertIsNone(self.g.store.get(7,22))
+        self.g.runtime.clear.assert_awaited_once_with(7,22,1)
+
     async def test_new_resets_only_guest_session_and_not_quotas(self):
         await self.a.on_message(event("hello"))
         await self.a.on_message(event("/new"))
@@ -206,6 +224,18 @@ class GuestTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_cleanup_preserves_a_new_grant_and_other_guest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "guests"
+            runtime = GuestRuntime(root, Path(tmp)/"unused", Path(tmp)/"unused-auth")
+            for path in (root/"7/22/1", root/"7/22/3", root/"7/23/1"):
+                path.mkdir(parents=True)
+                (path/"history").write_text("fixture")
+            await runtime.clear(7,22,1)
+            self.assertFalse((root/"7/22/1").exists())
+            self.assertTrue((root/"7/22/3/history").is_file())
+            self.assertTrue((root/"7/23/1/history").is_file())
+
     async def test_failed_container_cleanup_blocks_new_guests(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = GuestRuntime(Path(tmp)/"guests",Path(tmp)/"binary",Path(tmp)/"auth")

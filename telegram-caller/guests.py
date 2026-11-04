@@ -138,7 +138,7 @@ class Guests:
                     raise ValueError("That name is missing or ambiguous. Please use the exact @username.")
                 target = matches[0].id
         entity = await self.a.client.get_entity(target)
-        if not isinstance(entity, User) or entity.bot or entity.deleted or entity.id <= 0:
+        if not isinstance(entity, User) or entity.bot or entity.deleted or entity.is_self or entity.id <= 0:
             raise ValueError("Please choose a person's account, not a group, channel or bot.")
         return entity.id, "@" + entity.username if entity.username else str(entity.id)
 
@@ -150,6 +150,8 @@ class Guests:
             return False
         action, target = parsed
         try:
+            if action != "deny":
+                await self.owner_activity()
             if action == "guests":
                 rows = self.store.list(self.owner)
                 text = "Approved guests:\n" + "\n".join(f"{r['label']} — ID {r['guest']}" for r in rows) if rows else "No guests are approved."
@@ -168,10 +170,11 @@ class Guests:
                 added = self.store.allow(self.owner, guest, label)
                 await event.reply(f"{label} (ID {guest}) can now talk to the assistant." if added else "That guest already has access.", parse_mode=None)
             elif action == "deny":
+                previous = self.store.get(self.owner, guest)
                 removed = self.store.deny(self.owner, guest)  # invalidate late replies before awaiting cleanup
                 await self.cancel(guest)
-                if removed:
-                    await self.runtime.clear(self.owner, guest)
+                if removed and previous:
+                    await self.runtime.clear(self.owner, guest, previous["generation"])
                 await event.reply("Guest access removed." if removed else "That person has no guest access.")
             else:
                 row = self.store.get(self.owner, guest)
@@ -228,10 +231,12 @@ class Guests:
                 await self.exhausted(guest, generation)
                 return
             self.store.reset(self.owner, guest)
+            updated = self.store.get(self.owner, guest)
             await self.cancel(guest)
-            await self.runtime.clear(self.owner, guest)
-            await self.introduction(self.store.get(self.owner, guest))
-            await self.send(guest, self.store.get(self.owner, guest)["generation"], "Started a fresh conversation. Daily limits are unchanged.")
+            await self.runtime.clear(self.owner, guest, generation)
+            if updated and self.current(guest, updated["generation"]):
+                await self.introduction(updated)
+                await self.send(guest, updated["generation"], "Started a fresh conversation. Daily limits are unchanged.")
             return
         if not self.available():
             now = time.monotonic()

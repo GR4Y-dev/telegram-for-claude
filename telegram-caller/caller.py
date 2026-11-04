@@ -755,9 +755,9 @@ class Assistant:
                 await guests.message(event)
             return
         if guests:
-            await guests.owner_activity()
             if await guests.owner_command(event):
                 return
+            await guests.owner_activity()
         # Forwarded commands are quoted content, never instructions to act.
         m = None if getattr(event, "fwd_from", None) else COMMAND.match((event.raw_text or "").strip())
         if not m:
