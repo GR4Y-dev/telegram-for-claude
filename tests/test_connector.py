@@ -288,8 +288,8 @@ async def main():
                            schedule_at=server._when(NOW + timedelta(hours=2)),
                            reply_to_message_id=5, as_document=True, file_name="ignored.zip")
             kind, f, kw = fake.calls[-1]
-            check(kind == "send_file" and f.getvalue() == downloaded.read_bytes()
-                  and f.name == downloaded.name, "WhatsApp file sent with spaces and Unicode filename preserved")
+            check(kind == "send_file" and Path(f).read_bytes() == downloaded.read_bytes()
+                  and Path(f).name == downloaded.name, "WhatsApp file sent with spaces and Unicode filename preserved")
             check(kw["caption"] == "from WhatsApp" and kw["schedule"] is not None
                   and kw["reply_to"] == 5 and kw["force_document"] is True,
                   "WhatsApp file keeps caption, schedule, reply and document options")
@@ -325,8 +325,12 @@ async def main():
             with (store / "large.zip").open("wb") as large:
                 large.truncate(1024 * 1024 + 1)
             with patch.object(server, "MAX_UPLOAD_MB", 1):
+                await call("send_file", chat="me", whatsapp_file="/home/app/store/large.zip")
+                check(fake.calls[-1][0] == "send_file", "WhatsApp files are not held to the in-memory upload limit")
+                fake.calls.pop()
+            with patch.object(server, "MAX_WHATSAPP_MB", 1):
                 c = await call("send_file", chat="me", whatsapp_file="/home/app/store/large.zip")
-                check("bigger than 1 MB" in str(c), "WhatsApp file upload limit enforced")
+                check("bigger than 1 MB" in str(c), "WhatsApp file size limit enforced")
             with patch.object(Path, "open", side_effect=PermissionError):
                 c = await call("send_file", chat="me", whatsapp_file=source)
                 check("cannot read" in str(c) and "uid 10001" in str(c), "WhatsApp file permissions explained")

@@ -66,7 +66,7 @@ non-ASCII names are preserved; do not quote or URL-encode the path inside the pa
 Use exactly one source. Caption, schedule, reply and `as_document` work as usual.
 
 The store is mounted **read-only** at `/whatsapp-store`. Only regular files within it can
-be sent, up to `MAX_UPLOAD_MB` (default 50 MB); paths and symlinks escaping it are refused.
+be sent, up to `MAX_WHATSAPP_MB` (default 2000 MB, streamed from disk); paths and symlinks escaping it are refused.
 WhatsApp runs as uid **10001**, so its files may be private. The Telegram image runs as root
 by default and can read these files on a standard Docker named volume. If you override its
 user or use rootless/user-remapped Docker, grant the Telegram container's mapped user read
@@ -83,7 +83,8 @@ To disconnect, remove the `COMPOSE_FILE` line (or just this override from it) an
 | `TIMEZONE` | Your time zone, used for scheduled messages and dates |
 | `MAX_SENDS_PER_HOUR` | Safety limit for sends, files, forwards and edits together (default 30) |
 | `MAX_ATTACHMENT_MB` | Bigger attachments aren't opened (default 20) |
-| `MAX_UPLOAD_MB` | Biggest file Claude may send from a web link or WhatsApp (default 50) |
+| `MAX_UPLOAD_MB` | Biggest file Claude may send from a web link (default 50) |
+| `MAX_WHATSAPP_MB` | Biggest WhatsApp-downloaded file Claude may send (default 2000) |
 | `COMPOSE_FILE` | Optional Compose files, e.g. `docker-compose.yml:docker-compose.whatsapp.yml` |
 | `WHATSAPP_STORE_VOLUME` | Existing WhatsApp volume name when enabled (default `whatsapp-connector_whatsapp-store`) |
 
