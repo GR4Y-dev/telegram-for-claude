@@ -1,0 +1,11 @@
+# Opt in via COMPOSE_FILE=docker-compose.yml:docker-compose.whatsapp.yml in .env.
+# The external volume must already exist; the base Compose file does not need it.
+services:
+  telegram:
+    volumes:
+      - whatsapp-store:/whatsapp-store:ro
+
+volumes:
+  whatsapp-store:
+    external: true
+    name: ${WHATSAPP_STORE_VOLUME:-whatsapp-connector_whatsapp-store}

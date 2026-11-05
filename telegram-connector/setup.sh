@@ -43,6 +43,7 @@ fi
 DOMAIN="$(grep '^DOMAIN=' .env | cut -d= -f2)"
 
 echo "== 3/4 Building and logging in to Telegram =="
+# Compose reads COMPOSE_FILE from .env, including the optional WhatsApp store override.
 docker compose build
 if docker compose run --rm --no-deps telegram test -f /data/account.json; then
   echo "Already logged in to Telegram."

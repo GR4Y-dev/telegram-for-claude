@@ -30,6 +30,13 @@ trap failed ERR
 # What an update does for this project.
 apply() {
   if [ -f telegram-connector/.env ]; then
+    # The WhatsApp connector runs on this server too: let send_file read its downloaded files.
+    if [ -f telegram-connector/docker-compose.whatsapp.yml ] \
+       && ! grep -q '^COMPOSE_FILE=' telegram-connector/.env \
+       && docker volume inspect "${WHATSAPP_STORE_VOLUME:-whatsapp-connector_whatsapp-store}" >/dev/null 2>&1; then
+      printf '\nCOMPOSE_FILE=docker-compose.yml:docker-compose.whatsapp.yml\n' >> telegram-connector/.env
+    fi
+    # Keep Compose in this folder so .env's COMPOSE_FILE opt-ins apply to every call.
     (cd telegram-connector && python3 ../build_images.py)
   fi
   if [ -f telegram-caller/.env ] && [ -x telegram-caller/venv/bin/pip ]; then

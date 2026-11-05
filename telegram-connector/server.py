@@ -19,6 +19,7 @@ import logging
 import mimetypes
 import os
 import re
+import stat
 import zipfile
 import time
 from collections import deque
@@ -53,6 +54,7 @@ TZ = ZoneInfo(os.environ.get("TIMEZONE", "UTC"))
 MAX_SENDS_PER_HOUR = int(os.environ.get("MAX_SENDS_PER_HOUR", "30"))
 MAX_ATTACHMENT_MB = int(os.environ.get("MAX_ATTACHMENT_MB", "20"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
+WHATSAPP_STORE = Path("/whatsapp-store")
 MAX_TEXT_CHARS = 60_000   # how much text one read_attachment call returns
 IMAGE_SIDE = 1568         # pictures are shrunk to this many pixels on the long side
 SCANNED_PAGES = 5         # pages shown as pictures when a PDF has no text in it
@@ -839,6 +841,45 @@ async def send_message(chat: str, text: str, reply_to_message_id: int | None = N
     return out
 
 
+def _read_whatsapp_file(source: str) -> io.BytesIO:
+    """Read a downloaded WhatsApp file, confined to the optional store mount."""
+    prefix = "/home/app/store/"
+    if not source.startswith(prefix):
+        raise ValueError("whatsapp_file must be the /home/app/store/ path returned by WhatsApp download_media.")
+    if not WHATSAPP_STORE.is_dir():
+        raise ValueError(
+            "The WhatsApp store isn't connected. In telegram-connector/.env, set "
+            "COMPOSE_FILE=docker-compose.yml:docker-compose.whatsapp.yml, then run docker compose up -d "
+            "from telegram-connector. See README.md for WhatsApp files."
+        )
+    root = WHATSAPP_STORE.resolve()
+    path = (root / source[len(prefix):]).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("That WhatsApp path is outside the store.")
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("That WhatsApp path is not a regular file.")
+        if info.st_size > limit:
+            raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
+        with path.open("rb") as downloaded:
+            data = downloaded.read(limit + 1)
+    except FileNotFoundError:
+        raise ValueError("That WhatsApp file wasn't found. Download it again with WhatsApp download_media.") from None
+    except PermissionError:
+        raise ValueError(
+            "The Telegram container cannot read that WhatsApp file. Grant its user read access "
+            "to the file and search access to the store directories (WhatsApp uses uid 10001). "
+            "See README.md for WhatsApp files."
+        ) from None
+    if len(data) > limit:
+        raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
+    file = io.BytesIO(data)
+    file.name = Path(source).name
+    return file
+
+
 @mcp.tool(annotations=WRITE)
 async def send_file(
     chat: str,
@@ -851,6 +892,7 @@ async def send_file(
     as_document: bool = False,
     reply_to_message_id: int | None = None,
     schedule_at: str | None = None,
+    whatsapp_file: str | None = None,
 ) -> dict:
     """Send a file or photo FROM THE USER'S OWN Telegram account.
     Only call this after showing the user the recipient, the file and the caption, and
@@ -858,14 +900,16 @@ async def send_file(
       url: a public web link to download and send (max 50 MB), or
       text_content + file_name: a file you write yourself (notes.txt, list.csv, page.html...), or
       from_chat + from_message_id: re-send the attachment of another message, without
-        the "forwarded from" label.
+        the "forwarded from" label, or
+      whatsapp_file: the exact /home/app/store/ path from WhatsApp download_media
+        (up to the upload limit; requires the optional WhatsApp store mount). Keeps the filename.
     caption: optional text under the file (max 1024 characters).
     as_document: send pictures as files (full quality) instead of as photos.
     schedule_at: optional time to send it later, like send_message."""
     sources = [url is not None, text_content is not None,
-               from_chat is not None or from_message_id is not None]
+               from_chat is not None or from_message_id is not None, whatsapp_file is not None]
     if sum(sources) != 1:
-        raise ValueError("Give exactly one source: url, text_content, or from_chat + from_message_id.")
+        raise ValueError("Give exactly one source: url, text_content, from_chat + from_message_id, or whatsapp_file.")
     caption = (caption or "").strip()
     if len(caption) > 1024:
         raise ValueError("A caption can be at most 1024 characters.")
@@ -883,6 +927,8 @@ async def send_file(
             raise ValueError("The file would be empty.")
         file = io.BytesIO(text_content.encode("utf-8"))
         file.name = (file_name or "note.txt").strip()
+    elif whatsapp_file is not None:
+        file = _read_whatsapp_file(whatsapp_file)
     else:
         if not (from_chat and from_message_id):
             raise ValueError("Give both from_chat and from_message_id.")

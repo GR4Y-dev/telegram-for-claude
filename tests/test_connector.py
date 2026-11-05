@@ -10,6 +10,7 @@ import asyncio, io, os, sys, tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ["MCP_SECRET"] = "a" * 32
 os.environ["DATA_DIR"] = tempfile.gettempdir()
@@ -272,6 +273,74 @@ async def main():
     check(fake.calls[-1][1] is fake.msgs[1].media, "send_file re-sends another message's file")
     c = await call("send_file", chat="me", url="http://127.0.0.1:8000/x")
     check("private or local" in str(c), "send_file blocks local addresses")
+
+    # Files already downloaded by the optional WhatsApp connector.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Path(tmp) / "store"
+        store.mkdir()
+        relative = "120363399247816401@g.us/message/inmplant treatment سلام.zip"
+        downloaded = store / relative
+        downloaded.parent.mkdir(parents=True)
+        downloaded.write_bytes(b"PK\x03\x04WhatsApp download")
+        source = "/home/app/store/" + relative
+        with patch.object(server, "WHATSAPP_STORE", store):
+            c = await call("send_file", chat="me", whatsapp_file=source, caption="from WhatsApp",
+                           schedule_at=server._when(NOW + timedelta(hours=2)),
+                           reply_to_message_id=5, as_document=True, file_name="ignored.zip")
+            kind, f, kw = fake.calls[-1]
+            check(kind == "send_file" and f.getvalue() == downloaded.read_bytes()
+                  and f.name == downloaded.name, "WhatsApp file sent with spaces and Unicode filename preserved")
+            check(kw["caption"] == "from WhatsApp" and kw["schedule"] is not None
+                  and kw["reply_to"] == 5 and kw["force_document"] is True,
+                  "WhatsApp file keeps caption, schedule, reply and document options")
+            await call("send_file", chat="me", whatsapp_file=source)
+            check(fake.calls[-1][2]["force_document"] is False, "WhatsApp file respects as_document default")
+            calls_before = len(fake.calls)
+            for other in ({"url": "https://example.com/file"}, {"text_content": "x"},
+                          {"from_chat": "me", "from_message_id": 1}, {"from_message_id": 1}):
+                c = await call("send_file", chat="me", whatsapp_file=source, **other)
+                check("exactly one source" in str(c), "WhatsApp file rejects multiple sources: " + str(other))
+            for invalid in ("/home/app/store/../outside.zip", "/home/app/store//etc/passwd"):
+                c = await call("send_file", chat="me", whatsapp_file=invalid)
+                check("outside the store" in str(c), "WhatsApp path traversal rejected: " + invalid)
+            for invalid in (str(downloaded), "/home/app/store-elsewhere/file.zip", ""):
+                c = await call("send_file", chat="me", whatsapp_file=invalid)
+                check("path returned by WhatsApp" in str(c), "WhatsApp file requires the exact store prefix")
+            outside = Path(tmp) / "outside.zip"
+            outside.write_bytes(b"private")
+            # Windows requires Developer Mode or SeCreateSymbolicLinkPrivilege.
+            try:
+                (store / "escape.zip").symlink_to(outside)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                print("-- skipped WhatsApp symlink check (Windows symlink permission unavailable)")
+            else:
+                c = await call("send_file", chat="me", whatsapp_file="/home/app/store/escape.zip")
+                check("outside the store" in str(c), "WhatsApp symlink outside mount rejected")
+            c = await call("send_file", chat="me", whatsapp_file="/home/app/store/120363399247816401@g.us")
+            check("not a regular file" in str(c), "WhatsApp directory rejected")
+            c = await call("send_file", chat="me", whatsapp_file="/home/app/store/missing.zip")
+            check("wasn't found" in str(c), "missing WhatsApp file explained")
+            with (store / "large.zip").open("wb") as large:
+                large.truncate(1024 * 1024 + 1)
+            with patch.object(server, "MAX_UPLOAD_MB", 1):
+                c = await call("send_file", chat="me", whatsapp_file="/home/app/store/large.zip")
+                check("bigger than 1 MB" in str(c), "WhatsApp file upload limit enforced")
+            with patch.object(Path, "open", side_effect=PermissionError):
+                c = await call("send_file", chat="me", whatsapp_file=source)
+                check("cannot read" in str(c) and "uid 10001" in str(c), "WhatsApp file permissions explained")
+            check(len(fake.calls) == calls_before, "rejected WhatsApp files never reach Telegram")
+            server._sent_times.clear()
+            server._sent_times.extend([__import__("time").time()] * server.MAX_SENDS_PER_HOUR)
+            c = await call("send_file", chat="me", whatsapp_file=source)
+            check("Safety limit" in str(c), "hourly send limit covers WhatsApp files")
+            server._sent_times.clear()
+        with patch.object(server, "WHATSAPP_STORE", Path(tmp) / "not-mounted"):
+            c = await call("send_file", chat="me", whatsapp_file=source)
+            check("store isn't connected" in str(c) and "COMPOSE_FILE=" in str(c)
+                  and "docker compose up -d" in str(c), "missing WhatsApp mount explains how to enable it")
+
     c = await call("edit_message", chat="me", message_id=6, new_text="hack")
     check("someone else" in str(c), "can't edit other people's messages")
     await call("edit_message", chat="me", message_id=5, new_text="fixed")
