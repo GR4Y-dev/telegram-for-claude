@@ -17,6 +17,7 @@ services:
       MAX_SENDS_PER_HOUR: ${MAX_SENDS_PER_HOUR:-30}
       MAX_ATTACHMENT_MB: ${MAX_ATTACHMENT_MB:-20}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_WHATSAPP_MB: ${MAX_WHATSAPP_MB:-2000}
       TRANSCRIBE_API_KEY: ${TRANSCRIBE_API_KEY:-}
       TRANSCRIBE_URL: ${TRANSCRIBE_URL:-https://api.openai.com/v1/audio/transcriptions}
       TRANSCRIBE_MODEL: ${TRANSCRIBE_MODEL:-gpt-4o-transcribe}

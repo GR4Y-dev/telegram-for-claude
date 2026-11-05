@@ -55,6 +55,8 @@ MAX_SENDS_PER_HOUR = int(os.environ.get("MAX_SENDS_PER_HOUR", "30"))
 MAX_ATTACHMENT_MB = int(os.environ.get("MAX_ATTACHMENT_MB", "20"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
 WHATSAPP_STORE = Path("/whatsapp-store")
+# WhatsApp files are streamed from disk, so they can go up to Telegram's own 2 GB limit.
+MAX_WHATSAPP_MB = int(os.environ.get("MAX_WHATSAPP_MB", "2000"))
 MAX_TEXT_CHARS = 60_000   # how much text one read_attachment call returns
 IMAGE_SIDE = 1568         # pictures are shrunk to this many pixels on the long side
 SCANNED_PAGES = 5         # pages shown as pictures when a PDF has no text in it
@@ -841,7 +843,7 @@ async def send_message(chat: str, text: str, reply_to_message_id: int | None = N
     return out
 
 
-def _read_whatsapp_file(source: str) -> io.BytesIO:
+def _read_whatsapp_file(source: str) -> str:
     """Read a downloaded WhatsApp file, confined to the optional store mount."""
     prefix = "/home/app/store/"
     if not source.startswith(prefix):
@@ -856,15 +858,15 @@ def _read_whatsapp_file(source: str) -> io.BytesIO:
     path = (root / source[len(prefix):]).resolve()
     if not path.is_relative_to(root):
         raise ValueError("That WhatsApp path is outside the store.")
-    limit = MAX_UPLOAD_MB * 1024 * 1024
+    limit = MAX_WHATSAPP_MB * 1024 * 1024
     try:
         info = path.stat()
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("That WhatsApp path is not a regular file.")
         if info.st_size > limit:
-            raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
+            raise ValueError(f"That file is bigger than {MAX_WHATSAPP_MB} MB.")
         with path.open("rb") as downloaded:
-            data = downloaded.read(limit + 1)
+            downloaded.read(1)
     except FileNotFoundError:
         raise ValueError("That WhatsApp file wasn't found. Download it again with WhatsApp download_media.") from None
     except PermissionError:
@@ -873,11 +875,8 @@ def _read_whatsapp_file(source: str) -> io.BytesIO:
             "to the file and search access to the store directories (WhatsApp uses uid 10001). "
             "See README.md for WhatsApp files."
         ) from None
-    if len(data) > limit:
-        raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
-    file = io.BytesIO(data)
-    file.name = Path(source).name
-    return file
+    # Telethon streams the file from this path and keeps its name.
+    return str(path)
 
 
 @mcp.tool(annotations=WRITE)
@@ -902,7 +901,7 @@ async def send_file(
       from_chat + from_message_id: re-send the attachment of another message, without
         the "forwarded from" label, or
       whatsapp_file: the exact /home/app/store/ path from WhatsApp download_media
-        (up to the upload limit; requires the optional WhatsApp store mount). Keeps the filename.
+        (up to 2 GB; requires the optional WhatsApp store mount). Keeps the filename.
     caption: optional text under the file (max 1024 characters).
     as_document: send pictures as files (full quality) instead of as photos.
     schedule_at: optional time to send it later, like send_message."""
