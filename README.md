@@ -24,7 +24,7 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 - Open attachments: photos and screenshots, PDFs (scanned ones too), Word, Excel, text and code files
 - Write out voice messages, round videos and audio (Persian, English, Turkish and more)
 - Profiles: bio, birthday, last seen, profile picture
-- Send messages and files (from a link, written by Claude, or from another chat), now or **scheduled**
+- Send messages and files (from a link, written by Claude, another chat, or WhatsApp downloads), now or **scheduled**
 - Edit your own messages, forward, delete, mark as read
 - `call_me` / `text_me`: your assistant rings you or texts you from its own account, now or later
 - `update_server`: "update the server" updates everything right away
@@ -52,6 +52,12 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 **Hear it:** Jarvis ([Lewis](docs/samples/jarvis-lewis.mp3), [George](docs/samples/jarvis-george.mp3),
 [Daniel](docs/samples/jarvis-daniel.mp3), [Fable](docs/samples/jarvis-fable.mp3)) ·
 Persian ([Dilara](docs/samples/persian-dilara.mp3), [Farid](docs/samples/persian-farid.mp3))
+
+### WhatsApp files (optional)
+
+With the WhatsApp connector on the same server, `send_file` can send a file already saved
+by its `download_media` tool. Enable the read-only store mount once; setup and updates keep
+it enabled. See [the exact commands and permissions](telegram-connector/README.md#send-files-downloaded-by-whatsapp-optional).
 
 ## How it works
 
