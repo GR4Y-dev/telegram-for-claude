@@ -219,6 +219,11 @@ async def inspect(path, folder, check_disk, *, start=0, end=None, frames=MAX_FRA
         # Midpoints avoid the often-empty final frame and sample very short GIFs too.
         second = start + (end - start) * (i + .5) / count
         picture = await frame(path, second)
+        if not picture:
+            # Input seeking drops a frame that began before the seek point (a GIF or
+            # still frame shown for a while): retry at the start of this segment.
+            second = start + (end - start) * i / count
+            picture = await frame(path, second)
         if picture:
             pictures.append((second, picture))
     audio_path = None
