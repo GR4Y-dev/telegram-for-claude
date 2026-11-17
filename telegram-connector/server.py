@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 import time
 from collections import deque
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -46,6 +46,7 @@ from telethon.tl.types import (Channel, Chat, User, UserStatusLastMonth, UserSta
                                DocumentAttributeVideo, DocumentAttributeAnimated)
 from transfers import MB, Transfers, TransferError, _check_public, download_url, safe_name
 from download_links import DownloadLinks, public_origin
+from copy_jobs import CopyJobs
 import video_tools
 
 # ---------------------------------------------------------------- settings
@@ -55,6 +56,7 @@ SECRET = os.environ.get("MCP_SECRET", "").strip()
 PORT = int(os.environ.get("PORT", "8000"))
 TZ = ZoneInfo(os.environ.get("TIMEZONE", "UTC"))
 MAX_SENDS_PER_HOUR = int(os.environ.get("MAX_SENDS_PER_HOUR", "30"))
+COPY_SENDS_PER_HOUR = max(1, int(os.environ.get("COPY_SENDS_PER_HOUR", "60")))
 MAX_ATTACHMENT_MB = max(1, min(4000, int(os.environ.get("MAX_ATTACHMENT_MB", "2000"))))
 MAX_UPLOAD_MB = max(1, min(4000, int(os.environ.get("MAX_UPLOAD_MB", "2000"))))
 MAX_EXTRACT_MB = 20       # Never raise parser input budgets with transfer settings.
@@ -94,6 +96,22 @@ _client: TelegramClient | None = None
 _client_lock = asyncio.Lock()
 _sent_times: deque[float] = deque()
 _pending_sends = 0
+_copy_jobs: CopyJobs | None = None
+
+
+async def _copy_notice(message):
+    if CALLER:
+        await _tell_assistant("/text", message, None, count_send=False)
+
+
+def _get_copy_jobs():
+    global _copy_jobs
+    if _copy_jobs is None:
+        _copy_jobs = CopyJobs(DATA_DIR, get_client=lambda: tg(), resolve_chat=lambda c, s: resolve_chat(c, s),
+            transfers=_transfers, upload_limit=lambda c: _upload_limit(c, min(MAX_UPLOAD_MB, MAX_ATTACHMENT_MB)),
+            video_upload=lambda p, f: _video_upload(p, f), notify=_copy_notice,
+            sends_per_hour=COPY_SENDS_PER_HOUR)
+    return _copy_jobs
 
 
 async def tg() -> TelegramClient:
@@ -101,6 +119,7 @@ async def tg() -> TelegramClient:
     global _client
     async with _client_lock:
         if _client is not None and _client.is_connected():
+            _get_copy_jobs().startup()
             return _client
         if not ACCOUNT_FILE.exists():
             raise RuntimeError(
@@ -124,6 +143,7 @@ async def tg() -> TelegramClient:
                 "Settings > Devices). Run the login step from README.md again."
             )
         _client = client
+        _get_copy_jobs().startup()
         return _client
 
 
@@ -610,7 +630,10 @@ mcp = FastMCP(
         "send_file, edit_message, forward_messages or delete_messages, always show the "
         "user exactly what will happen (the chat, the exact text or file, which messages) "
         "and only go ahead after they clearly say yes. Never send to people the user did "
-        "not name. Only open attachments the user asked about. Reading chats with these "
+        "not name. start_copy and control_copy also need a clear yes: first show the "
+        "source, target, message id range and requested action. Copy jobs keep running "
+        "in the background and resume after a restart. Only open attachments the user "
+        "asked about. Reading chats with these "
         "tools does not mark them as read; mark_read does, and only when the user asks. "
         "Times (schedule_at, since, until) are the user's local time; whoami tells the "
         "current local time. call_me and text_me only ever reach the user themself, so "
@@ -638,18 +661,58 @@ async def download_file(request):
 
 
 def create_app():
-    """Keep FastMCP's transport/session lifecycle and add export housekeeping."""
+    """Keep FastMCP's lifecycle, export housekeeping and persistent copy workers."""
     app = mcp.streamable_http_app()
     transport_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
     async def lifespan(app):
         async with _download_links.lifespan(), transport_lifespan(app):
-            yield
+            jobs = _get_copy_jobs()
+            jobs.startup()
+            try:
+                yield
+            finally:
+                await jobs.shutdown()
 
     app.router.lifespan_context = lifespan
     app.router.redirect_slashes = False
     return app
+
+
+@mcp.tool(annotations=WRITE)
+async def start_copy(from_chat: str, to_chat: str, from_message_id: int,
+                     to_message_id: int | None = None, playable_videos: bool = True,
+                     rewrite_links: bool = True, link_map: dict[str, int] | None = None) -> dict:
+    """Copy messages FROM THE USER'S OWN account, in order, in the background.
+    Only call after showing the user the source, target and id range and getting
+    a clear yes. Only one copy job can run at once. Protected attachments are
+    downloaded and uploaded through private, bounded disk transfers.
+    to_message_id is inclusive; omitted means the newest message at start time.
+    link_map seeds source-id -> target-id pairs copied earlier. Playable H.264
+    MP4 documents become streaming videos; nothing is transcoded. Use copy_status
+    to watch progress and control_copy to pause, resume, skip or cancel."""
+    return await _get_copy_jobs().start(from_chat, to_chat, from_message_id, to_message_id,
+                                       playable_videos, rewrite_links, link_map)
+
+
+@mcp.tool(annotations=READ)
+async def copy_status(job_id: str | None = None) -> dict:
+    """Show copy progress, recent mappings, skipped messages and estimated rates.
+    Omit job_id for the running or newest job; use job_id='all' for a short list.
+    ETA is approximate because message ids can have gaps and file sizes vary."""
+    return _get_copy_jobs().status(job_id)
+
+
+@mcp.tool(annotations=WRITE)
+async def control_copy(job_id: str, action: str, link_map: dict[str, int] | None = None) -> dict:
+    """Control a background copy FROM THE USER'S OWN Telegram account.
+    Show the job's source, target, range and action and get a clear yes first.
+    action: pause, resume, skip_current (skip the paused message and resume),
+    cancel (keeps messages already sent), or add_links. link_map adds previously
+    copied source-id -> target-id pairs with any action. Resume reconciles any
+    uncertain send against recent target history before continuing."""
+    return await _get_copy_jobs().control(job_id, action, link_map)
 
 
 @mcp.tool(annotations=WRITE)
@@ -1322,13 +1385,14 @@ async def update_server() -> dict:
     return {"updating": True} | await _tell_assistant("/update", None, None)
 
 
-async def _tell_assistant(command: str, message: str | None, schedule_at: str | None) -> dict:
+async def _tell_assistant(command: str, message: str | None, schedule_at: str | None,
+                          *, count_send: bool = True) -> dict:
     """Send a command to the call assistant's account from the user's account."""
     if not CALLER:
         raise ValueError("The call assistant isn't set up yet: CALLER is missing in the "
                          "connector's .env (telegram-caller's setup.sh adds it).")
     when = _schedule_time(schedule_at) if schedule_at else None
-    with _send_budget():
+    with _send_budget() if count_send else nullcontext():
         client = await tg()
         target = await resolve_chat(client, CALLER)
         text = f"{command} {(message or '').strip()}".strip()
@@ -1338,7 +1402,8 @@ async def _tell_assistant(command: str, message: str | None, schedule_at: str | 
             sent = await client.send_message(target, text, schedule=when)
         except FloodWaitError as e:
             raise _slow_down(e)
-        _record_sends()
+        if count_send:
+            _record_sends()
     log.info("%s %s", "scheduled" if when else "sent", command)
     return {"scheduled_for": _when(sent.date)} if when else {}
 

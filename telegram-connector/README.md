@@ -123,6 +123,54 @@ The 60,000-character limit, 50 PDF text pages / 5 scanned pages, 25-megapixel im
 and Office archive limits stay unchanged. Oversized pictures are sent as full-quality
 documents to avoid decoding them during upload.
 
+## Copying a channel in the background
+
+After you approve the source, target and message id range, `start_copy` returns a
+job id immediately. The server copies in ascending order, preserves formatting,
+captions, mapped replies and albums where Telegram accepts them. The last id is
+inclusive; leaving it out freezes the range at the newest post when the job starts.
+Only one job runs at a time. The target must allow your account to post.
+
+Protected attachments download to bounded private disk and upload again. Other
+attachments use Telegram references when possible. Original filenames, document
+attributes and small thumbnails are retained. `playable_videos=True` promotes
+H.264 MP4 documents to streaming videos; other formats keep their type, without
+transcoding. Long captions follow their file as separate formatted text. Albums
+that require separate captions or exceed the hourly budget are sent item by item.
+Account limits are 2000 MB, or 4000 MB with Premium, further bounded by
+`MAX_UPLOAD_MB` and `MAX_ATTACHMENT_MB`. A file above the limit pauses the job;
+disk reserve checks and the shared interactive transfer slot also apply.
+
+Use `copy_status(job_id)` to see progress, rates, an approximate ETA, recent maps,
+skips and unresolved links; `copy_status('all')` lists up to 20 recent jobs.
+`control_copy(job_id, 'pause' | 'resume' | 'skip_current' | 'cancel')` controls it.
+`skip_current` skips the paused source message and resumes. Cancellation keeps
+messages already sent. `link_map={"source_id": target_id}` can seed earlier copies
+on start or with any control action, including `add_links`; conflicting mappings
+are refused. Seeded messages inside the range are treated as already copied.
+
+Links to the source are rewritten using mappings available when each message is
+copied. Deleted or skipped ids can point to the next mapped post within the range.
+Links to posts not yet copied stay unchanged and are reported; existing target
+posts are not edited later. Private conversations and basic groups lack post links.
+`rewrite_links=False` preserves the original links.
+
+`COPY_SENDS_PER_HOUR` defaults to 60, independently of interactive sends. Each
+album item and separate text message counts once; sends are paced three seconds
+apart. Exhausted budgets, busy transfers and flood waits wait automatically.
+Repeated failures pause the job. If `CALLER` is configured, the assistant texts
+you when a job pauses on an error, fails or finishes.
+
+State lives in `DATA_DIR/copy-jobs` as atomic private JSON files (0600 on Linux).
+Running/waiting jobs resume on startup, including after a tool call times out.
+Use one connector process per data volume. Recovery checks the newest 20 target
+messages against the pending send's time, outgoing flag, filename/size or text
+prefix, including each album item and separate caption. This cannot guarantee
+exactly-once delivery: busy target chats, identical messages, deleted target posts
+or Telegram changing photo sizes can defeat matching. Inspect recent target
+messages after an interrupted send before resuming a job when duplication matters.
+State includes pending text and mappings; keep the data volume private.
+
 ## Download original files to your PC
 
 Ask Claude Code on your PC: **"Get the original video from that Telegram message and
@@ -228,6 +276,7 @@ The caller already installs FFmpeg during setup. No deployment is performed by t
 |---|---|
 | `TIMEZONE` | Your time zone, used for scheduled messages and dates |
 | `MAX_SENDS_PER_HOUR` | Safety limit for sends, files, forwards and edits together (default 30) |
+| `COPY_SENDS_PER_HOUR` | Separate hourly budget shared by background copy jobs (default 60); waits when exhausted |
 | `MAX_ATTACHMENT_MB` | Telegram disk-download limit (default 2000, maximum 4000); document/image extraction stays at or below 20 MB, video output is separately bounded |
 | `MAX_UPLOAD_MB` | Biggest file Claude may send from a web link (default 2000; up to 4000 with Premium) |
 | `MAX_WHATSAPP_MB` | Biggest WhatsApp-downloaded file Claude may send (default 2000; up to 4000 with Premium) |
@@ -239,7 +288,8 @@ The caller already installs FFmpeg during setup. No deployment is performed by t
 | `WHATSAPP_STORE_VOLUME` | Existing WhatsApp volume name when enabled (default `whatsapp-connector_whatsapp-store`) |
 
 ## Safety limits built in
-- At most 30 sends, files, forwards and edits per hour together, so the account never looks like spam.
+- Interactive sends, files, forwards and edits share a 30-per-hour budget by default;
+  background copies have a separate 60-per-hour budget. Telegram can impose additional flood waits.
 - Reading chats does **not** mark them as read. Only `mark_read` does, when you ask for it.
 - Claude can only edit your own messages. Deleting is at most 50 messages at once.
 - Links to private or local addresses are refused.
