@@ -110,11 +110,11 @@ class Transfers:
                 raise TransferError("The file transfer took too long and was stopped. Try again with a faster source or a smaller file.") from None
 
     @asynccontextmanager
-    async def file(self, limit, expected=None):
+    async def file(self, limit, expected=None, *, directory=None):
         async with self.slot(expected if expected is not None else limit) as timer:
             # mkdtemp is private (0700); the file is 0600. Cleanup is synchronous so
             # cancellation cannot interrupt it, including cancellation during upload.
-            with tempfile.TemporaryDirectory(prefix="telegram-transfer-") as folder:
+            with tempfile.TemporaryDirectory(prefix="telegram-transfer-", dir=directory) as folder:
                 item = Transfer(folder, limit, self.reserve, expected)
                 item.timer = timer
                 try:
