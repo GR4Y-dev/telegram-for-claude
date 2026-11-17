@@ -28,6 +28,8 @@ jobs:
       - name: Updater tests
         run: bash tests/test_update.sh
       - name: Connector tests
+        env:
+          RUN_PUBLIC_DOWNLOAD: "1"
         run: python tests/test_connector.py
       - name: Call assistant tests
         env:
@@ -38,12 +40,19 @@ jobs:
           python -m unittest discover -s tests -p test_chat.py -v
           python -m unittest discover -s tests -p 'test_assistant_*.py' -v
           python -m unittest discover -s tests -p 'test_security.py' -v
+          python -m unittest discover -s tests -p 'test_transfers.py' -v
+          REQUIRE_FFMPEG=1 python tests/test_video.py -v
+          python -m unittest discover -s tests -p 'test_video_chat.py' -v
           python -m unittest discover -s tests -p 'test_runtime.py' -v
           python -m unittest discover -s tests -p 'test_build_images.py' -v
           python -m unittest discover -s tests -p 'test_guests.py' -v
           python -m unittest discover -s tests -p 'test_guest_setup.py' -v
       - name: Build the connector image
-        run: docker build -q telegram-connector
+        run: |
+          docker build -q -t telegram-connector-test telegram-connector
+          docker run --rm -e REQUIRE_FFMPEG=1 -e PYTHONPATH=/app -v "$PWD/tests:/tests:ro" telegram-connector-test python /tests/test_video.py RealVideoTests -v
+          docker image inspect telegram-connector-test --format 'Connector image bytes: {{.Size}}'
+          docker history telegram-connector-test --format '{{.Size}} {{.CreatedBy}}' | awk '/apt-get/{print "Distro media layer:", $0}'
       - name: Guest container isolation and cancellation (no provider calls)
         run: |
           docker build -t telegram-guest-claude:2.1.286 telegram-caller/guest-runtime
