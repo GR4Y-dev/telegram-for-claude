@@ -204,7 +204,8 @@ async def frame(path, second, *, side=IMAGE_SIDE):
     return await _run("ffmpeg", ["-nostdin", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-ss", f"{second:.3f}", *_input(path), "-map", "0:v:0", "-an", "-sn", "-dn",
         "-frames:v", "1", "-vf", f"scale=w='min({side},iw)':h='min({side},ih)':force_original_aspect_ratio=decrease",
-        "-threads", "1", "-c:v", "mjpeg", "-q:v", "6", "-f", "image2pipe", "pipe:1"],
+        # FFmpeg 5/6 (Debian, Ubuntu) refuse limited-range YUV for MJPEG; use full-range.
+        "-pix_fmt", "yuvj420p", "-threads", "1", "-c:v", "mjpeg", "-q:v", "6", "-f", "image2pipe", "pipe:1"],
         limit=MAX_FRAME_BYTES)
 
 
