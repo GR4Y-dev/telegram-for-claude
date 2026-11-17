@@ -15,15 +15,19 @@ services:
       MCP_SECRET: ${MCP_SECRET}
       TIMEZONE: ${TIMEZONE:-UTC}
       MAX_SENDS_PER_HOUR: ${MAX_SENDS_PER_HOUR:-30}
-      MAX_ATTACHMENT_MB: ${MAX_ATTACHMENT_MB:-20}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_ATTACHMENT_MB: ${MAX_ATTACHMENT_MB:-2000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2000}
       MAX_WHATSAPP_MB: ${MAX_WHATSAPP_MB:-2000}
+      DISK_RESERVE_MB: ${DISK_RESERVE_MB:-2048}
+      VIDEO_LOCK_DIR: /video-lock
       TRANSCRIBE_API_KEY: ${TRANSCRIBE_API_KEY:-}
       TRANSCRIBE_URL: ${TRANSCRIBE_URL:-https://api.openai.com/v1/audio/transcriptions}
       TRANSCRIBE_MODEL: ${TRANSCRIBE_MODEL:-gpt-4o-transcribe}
       CALLER: ${CALLER:-}
     volumes:
       - telegram-data:/data
+      # Shares one video-processing slot with the host caller, without exposing data.
+      - /run/lock/telegram-video:/video-lock
 
   # Free Cloudflare Tunnel: gives the connector its https:// address (DOMAIN in .env)
   # without opening any ports on the server.

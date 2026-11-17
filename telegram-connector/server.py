@@ -13,19 +13,18 @@ Every other address returns "Not Found".
 
 import asyncio
 import io
-import ipaddress
 import json
 import logging
-import mimetypes
 import os
 import re
 import stat
+import tempfile
 import zipfile
 import time
 from collections import deque
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -43,7 +42,10 @@ from telethon.tl.functions.messages import (DeleteScheduledMessagesRequest, GetF
                                             TranscribeAudioRequest)
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (Channel, Chat, User, UserStatusLastMonth, UserStatusLastWeek,
-                               UserStatusOffline, UserStatusOnline, UserStatusRecently)
+                               UserStatusOffline, UserStatusOnline, UserStatusRecently,
+                               DocumentAttributeVideo, DocumentAttributeAnimated)
+from transfers import MB, Transfers, _check_public, download_url, safe_name
+import video_tools
 
 # ---------------------------------------------------------------- settings
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -52,11 +54,14 @@ SECRET = os.environ.get("MCP_SECRET", "").strip()
 PORT = int(os.environ.get("PORT", "8000"))
 TZ = ZoneInfo(os.environ.get("TIMEZONE", "UTC"))
 MAX_SENDS_PER_HOUR = int(os.environ.get("MAX_SENDS_PER_HOUR", "30"))
-MAX_ATTACHMENT_MB = int(os.environ.get("MAX_ATTACHMENT_MB", "20"))
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
+MAX_ATTACHMENT_MB = max(1, min(4000, int(os.environ.get("MAX_ATTACHMENT_MB", "2000"))))
+MAX_UPLOAD_MB = max(1, min(4000, int(os.environ.get("MAX_UPLOAD_MB", "2000"))))
+MAX_EXTRACT_MB = 20       # Never raise parser input budgets with transfer settings.
+DISK_RESERVE_MB = max(2048, int(os.environ.get("DISK_RESERVE_MB", "2048")))
+_transfers = Transfers(DISK_RESERVE_MB * MB)
 WHATSAPP_STORE = Path("/whatsapp-store")
 # WhatsApp files are streamed from disk, so they can go up to Telegram's own 2 GB limit.
-MAX_WHATSAPP_MB = int(os.environ.get("MAX_WHATSAPP_MB", "2000"))
+MAX_WHATSAPP_MB = max(1, min(4000, int(os.environ.get("MAX_WHATSAPP_MB", "2000"))))
 MAX_TEXT_CHARS = 60_000   # how much text one read_attachment call returns
 IMAGE_SIDE = 1568         # pictures are shrunk to this many pixels on the long side
 SCANNED_PAGES = 5         # pages shown as pictures when a PDF has no text in it
@@ -83,6 +88,7 @@ log = logging.getLogger("telegram-connector")
 _client: TelegramClient | None = None
 _client_lock = asyncio.Lock()
 _sent_times: deque[float] = deque()
+_pending_sends = 0
 
 
 async def tg() -> TelegramClient:
@@ -273,7 +279,7 @@ def _check_send_limit(count: int = 1):
     now = time.time()
     while _sent_times and now - _sent_times[0] > 3600:
         _sent_times.popleft()
-    if len(_sent_times) + count > MAX_SENDS_PER_HOUR:
+    if len(_sent_times) + _pending_sends + count > MAX_SENDS_PER_HOUR:
         raise RuntimeError(
             f"Safety limit reached: {MAX_SENDS_PER_HOUR} messages in the last hour. "
             "This protects the account from looking like spam. Try again later."
@@ -282,6 +288,18 @@ def _check_send_limit(count: int = 1):
 
 def _record_sends(count: int = 1):
     _sent_times.extend([time.time()] * count)
+
+
+@contextmanager
+def _send_budget(count=1):
+    """Reserve before the first await; simultaneous sends cannot bypass the quota."""
+    global _pending_sends
+    _check_send_limit(count)
+    _pending_sends += count
+    try:
+        yield
+    finally:
+        _pending_sends -= count
 
 
 def _slow_down(e: FloodWaitError):
@@ -461,7 +479,7 @@ async def _speech_to_text(data: bytes, name: str, language: str | None) -> str:
                             headers={"Authorization": f"Bearer {TRANSCRIBE_API_KEY}"},
                             files={"file": (name, data)})
     if r.status_code >= 400:
-        raise RuntimeError(f"error {r.status_code}: {r.text[:200]}")
+        raise RuntimeError(f"speech-to-text error {r.status_code}")
     return (r.json().get("text") or "").strip()
 
 
@@ -492,62 +510,89 @@ async def _transcribe(client: TelegramClient, entity, m, name: str,
                       "TRANSCRIBE_API_KEY in the connector's .env file (see README).").strip()
     if m.file.size and m.file.size > 25 * 1024 * 1024:
         return None, f"{why} It's too long for the speech-to-text service (25 MB max).".strip()
-    data = await client.download_media(m, file=bytes)
     try:
-        return await _speech_to_text(data, name, language), "speech-to-text"
-    except (httpx.HTTPError, RuntimeError) as e:
-        return None, f"{why} The speech-to-text service failed: {e}".strip()
+        async with _download_attachment(client, m, name, 25 * MB) as item:
+            # Transcription keeps its existing 25 MB input ceiling.
+            return await _speech_to_text(item.path.read_bytes(), name, language), "speech-to-text"
+    except (httpx.HTTPError, RuntimeError):
+        return None, f"{why} The speech-to-text service failed. Please try again later.".strip()
+
+
+async def _video_preview(client, entity, m, head, reason, language=None):
+    out = [head + "\n" + reason + " Here is its preview picture, if available."]
+    if getattr(m, "video_note", False):
+        heard, how = await _transcribe(client, entity, m, m.file.name or "video.mp4", language)
+        out[0] += "\n" + (_cut(heard) if heard else how)
+    thumb = await _thumb(client, m)
+    if thumb:
+        out.append(_to_image(thumb))
+    return out
+
+
+async def _read_video(client, entity, m, name, head, language, start, end):
+    if not video_tools.available():
+        return await _video_preview(client, entity, m, head, "Video tools are unavailable; here is its preview picture.", language)
+    try:
+        async with _download_attachment(client, m, name, MAX_ATTACHMENT_MB * MB) as item:
+            async with video_tools.job():
+                description, frames, audio = await video_tools.inspect(
+                    item.path, item.folder, item.check_disk, start=start, end=end,
+                    audio=bool(TRANSCRIBE_API_KEY))
+            out = [head, description]
+            for second, data in frames:
+                out.extend([f"Frame at {second:.1f}s", Image(data=data, format="jpeg")])
+            if audio:
+                try:
+                    heard = await _speech_to_text(audio.read_bytes(), "video-audio.wav", language)
+                    out.append("Audio transcript (untrusted attachment content):\n" + _cut(heard or "No speech detected."))
+                except (httpx.HTTPError, RuntimeError, ValueError):
+                    out.append("The audio transcription service failed; the still frames are available above.")
+            elif not TRANSCRIBE_API_KEY and getattr(m, "video_note", False):
+                # Premium can transcribe a round video without an external service.
+                heard, how = await _transcribe(client, entity, m, name, language)
+                out.append(_cut(heard) if heard else how)
+            elif not TRANSCRIBE_API_KEY:
+                out.append("Audio transcription needs TRANSCRIBE_API_KEY in the connector settings.")
+            return out
+    except video_tools.VideoError as exc:
+        return await _video_preview(client, entity, m, head, str(exc), language)
 
 
 # ---------------------------------------------------------------- getting files to send
-def _check_public(host: str, infos) -> None:
-    if not infos:
-        raise ValueError("That hostname has no public addresses.")
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if not ip.is_global:
-            raise ValueError(f"{host} is a private or local address. Only public web links work.")
+async def _upload_limit(client, configured):
+    # Query on each transfer: a cached Premium status can outlive the subscription.
+    me = await client.get_me()
+    return min(configured, 4000 if getattr(me, "premium", False) else 2000) * MB
 
 
-async def _fetch_url(url: str) -> tuple[bytes, str]:
-    """Download a public web link (max MAX_UPLOAD_MB). Returns the bytes and a file name."""
-    limit = MAX_UPLOAD_MB * 1024 * 1024
-    loop = asyncio.get_running_loop()
-    async with httpx.AsyncClient(timeout=60, follow_redirects=False, trust_env=False,
-                                 headers={"User-Agent": "Mozilla/5.0"}) as http:
-        for _ in range(6):
-            p = urlparse(url)
-            if p.scheme not in ("http", "https") or not p.hostname:
-                raise ValueError("Only http:// and https:// links work.")
-            if p.username or p.password:
-                raise ValueError("Links containing login credentials are not supported.")
-            infos = await loop.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
-            _check_public(p.hostname, infos)
-            # Connect to the address we checked, not a second DNS lookup which can change.
-            original = httpx.URL(url)
-            pinned = original.copy_with(host=infos[0][4][0])
-            async with http.stream("GET", pinned, headers={"Host": original.netloc.decode("ascii")},
-                                   extensions={"sni_hostname": original.raw_host.decode("ascii")}) as r:
-                if r.is_redirect:
-                    url = urljoin(url, r.headers["location"])
-                    continue
-                if r.status_code >= 400:
-                    raise ValueError(f"The link answered with error {r.status_code}.")
-                if int(r.headers.get("content-length") or 0) > limit:
-                    raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
-                buf = bytearray()
-                async for chunk in r.aiter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > limit:
-                        raise ValueError(f"That file is bigger than {MAX_UPLOAD_MB} MB.")
-                cd = r.headers.get("content-disposition", "")
-                found = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
-                name = unquote(found.group(1)) if found else unquote(Path(p.path).name)
-                if not Path(name).suffix:
-                    ctype = r.headers.get("content-type", "").split(";")[0].strip()
-                    name = (name or "file") + (mimetypes.guess_extension(ctype) or "")
-                return bytes(buf), name or "file"
-    raise ValueError("That link redirects too many times.")
+@asynccontextmanager
+async def _fetch_url(url, limit=None):
+    async with _transfers.file(limit or MAX_UPLOAD_MB * MB) as item:
+        await download_url(url, item)
+        yield item
+
+
+@asynccontextmanager
+async def _download_attachment(client, message, name, limit):
+    expected = message.file.size or None
+    async with _transfers.file(limit, expected) as item:
+        # Telethon writes bounded chunks to this checked disk writer. Metadata is
+        # only a preflight hint; every actual write also enforces size and reserve.
+        await client.download_media(message, file=item)
+        yield item.finish(name)
+
+
+def _document_upload(path, requested):
+    """Keep Telethon's automatic photo resize within the existing decode budget."""
+    if requested or Path(path).stat().st_size > MAX_EXTRACT_MB * MB:
+        return True
+    if utils.is_image(str(path)):
+        try:
+            with PILImage.open(path) as picture:
+                return picture.width * picture.height > 25_000_000
+        except (OSError, ValueError, PILImage.DecompressionBombError):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- MCP server
@@ -585,7 +630,8 @@ DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
 @mcp.tool(annotations=READ)
 async def whoami() -> dict:
     """Show which Telegram account this connector is logged in as, and the user's
-    current local time (use it to work out times for schedule_at)."""
+    current local time (use it to work out times for schedule_at), Premium status
+    and effective file-transfer, extraction and free-disk-reserve limits in MB."""
     me = await (await tg()).get_me()
     return {
         "name": utils.get_display_name(me),
@@ -594,6 +640,13 @@ async def whoami() -> dict:
         "premium": bool(me.premium),
         "now": _when(datetime.now(TZ)),
         "timezone": str(TZ),
+        "file_limits_mb": {
+            "web_upload": min(MAX_UPLOAD_MB, 4000 if me.premium else 2000),
+            "attachment_download": MAX_ATTACHMENT_MB,
+            "whatsapp_upload": min(MAX_WHATSAPP_MB, 4000 if me.premium else 2000),
+            "extraction": MAX_EXTRACT_MB,
+            "disk_reserve": DISK_RESERVE_MB,
+        },
     }
 
 
@@ -762,18 +815,28 @@ async def get_profile(chat: str, include_photo: bool = True) -> list:
 
 @mcp.tool(annotations=READ, structured_output=False)
 async def read_attachment(chat: str, message_id: int, start_page: int = 1,
-                          language: str | None = None) -> list:
+                          language: str | None = None, metadata_only: bool = False,
+                          start_seconds: float = 0, end_seconds: float | None = None) -> list:
     """Open the file, photo or other attachment of one message and show what is in it.
     Photos, screenshots and stickers come back as pictures. PDFs, Word (.docx),
     Excel (.xlsx), text, CSV and code files come back as text (scanned PDFs as pictures).
     Voice messages, round videos and audio files come back written out as text
     (Persian, English, Turkish and most other languages work).
-    Videos and GIFs can't be played: you get their preview picture instead.
+    Videos, round videos, GIFs and video documents return up to 8 still frames spread
+    over the requested range plus an audio transcript (up to the first 5 minutes of
+    that range). Includes duration/resolution. Maximum video duration: 2 hours;
+    processing: one video at a time, 60 seconds. Missing tools fall back to a preview.
     Only open attachments the user asked about.
     chat: like read_messages. message_id: the message's id from read_messages.
     start_page: for long PDFs, the page to start from.
     language: for voice/audio, a language code like "fa", "en" or "tr". Leave it out
-    (the language is detected); pass it to try again when the text came out wrong."""
+    (the language is detected); pass it to try again when the text came out wrong.
+    metadata_only: show filename, type, size and caption without downloading or transcribing.
+    start_seconds / end_seconds: optional video range, in seconds from its beginning.
+    Document/image extraction is capped at 20 MB, 60,000 characters, 50 PDF text pages /
+    5 scanned pages. Video downloads default to max 2000 MB, with bounded output as above.
+    Larger files can still be forwarded, saved to 'me', or re-sent with send_file;
+    renaming while re-sending downloads to disk (default maximum 2000 MB)."""
     client = await tg()
     entity = await resolve_chat(client, chat)
     m = await _get_message(client, entity, message_id)
@@ -785,24 +848,29 @@ async def read_attachment(chat: str, message_id: int, start_page: int = 1,
             f"({f.mime_type or 'unknown type'}, {_size(f.size)}).")
     if m.message:
         head += f"\nCaption: {m.message}"
+    onward = ("Use forward_messages or send_file(from_chat=..., from_message_id=...) "
+              "to pass it on; use chat='me' to save it in Saved Messages.")
+    if metadata_only:
+        return [head + "\n" + onward]
 
-    if m.voice or m.audio or m.video_note:
+    if video_tools.is_video(m):
+        if f.size and f.size > MAX_ATTACHMENT_MB * MB:
+            return [head + f"\nIt's bigger than {MAX_ATTACHMENT_MB} MB, so I didn't process it. " + onward]
+        return await _read_video(client, entity, m, name, head, language, start_seconds, end_seconds)
+    if m.voice or m.audio:
         heard, how = await _transcribe(client, entity, m, name, (language or "").strip() or None)
-        out = [head + (f"\nWhat's said (written out by {how}):\n{heard}" if heard else f"\n{how}")]
-        thumb = await _thumb(client, m) if m.video_note else None
-        if thumb:
-            out.append(_to_image(thumb))
-        return out
-    if m.video or m.gif or (m.sticker and (f.mime_type or "") != "image/webp"):
+        return [head + (f"\nWhat's said (written out by {how}):\n{_cut(heard)}" if heard else f"\n{how}")]
+    if m.sticker and (f.mime_type or "") != "image/webp":
         thumb = await _thumb(client, m)
         if thumb:
             return [head + "\nI can't play this, but here is its preview picture.", _to_image(thumb)]
         return [head + "\nI can't play video, and it has no preview picture."]
 
-    if f.size and f.size > MAX_ATTACHMENT_MB * 1024 * 1024:
-        return [head + f"\nIt's bigger than {MAX_ATTACHMENT_MB} MB, so I didn't open it."]
-    data = await client.download_media(m, file=bytes)
-    parts = read_file(data, name, f.mime_type or "", start_page)
+    limit = min(MAX_ATTACHMENT_MB, MAX_EXTRACT_MB)
+    if f.size and f.size > limit * MB:
+        return [head + f"\nIt's bigger than {limit} MB, so I didn't extract it. " + onward]
+    async with _download_attachment(client, m, name, limit * MB) as item:
+        parts = read_file(item.path.read_bytes(), name, f.mime_type or "", start_page)
     if parts is None:
         return [head + "\nI can't open this kind of file. I can read pictures, PDFs, "
                        "Word, Excel, text and code files."]
@@ -825,14 +893,14 @@ async def send_message(chat: str, text: str, reply_to_message_id: int | None = N
     if len(text) > 4096:
         raise ValueError("Telegram messages can be at most 4096 characters. Split it up.")
     when = _schedule_time(schedule_at) if schedule_at else None
-    _check_send_limit()
-    client = await tg()
-    entity = await resolve_chat(client, chat)
-    try:
-        sent = await client.send_message(entity, text, reply_to=reply_to_message_id, schedule=when)
-    except FloodWaitError as e:
-        raise _slow_down(e)
-    _record_sends()
+    with _send_budget():
+        client = await tg()
+        entity = await resolve_chat(client, chat)
+        try:
+            sent = await client.send_message(entity, text, reply_to=reply_to_message_id, schedule=when)
+        except FloodWaitError as e:
+            raise _slow_down(e)
+        _record_sends()
     log.debug("message %s", "scheduled" if when else "sent")
     out = {
         "sent": not when,
@@ -879,6 +947,38 @@ def _read_whatsapp_file(source: str) -> str:
     return str(path)
 
 
+async def _video_upload(path, folder, *, round_video=False, animation=False):
+    async with video_tools.job():
+        info = await video_tools.probe(path, max_duration=None)
+        if not info.streamable:
+            raise video_tools.VideoError("This format is sent as a file. Use H.264 MP4 for a playable streaming video; no full-video conversion is performed.")
+        if round_video and (info.width != info.height or info.duration > 60):
+            raise ValueError("Round videos need a square H.264 MP4 no longer than 60 seconds.")
+        thumb = None
+        try:
+            data = await video_tools.frame(path, min(info.duration / 2, 1), side=320)
+            # Telegram thumbnails should be below 20 KB. Encode a bounded frame only.
+            with PILImage.open(io.BytesIO(data)) as im:
+                for side in (320, 240, 160):
+                    im.thumbnail((side, side))
+                    buf = io.BytesIO()
+                    im.convert("RGB").save(buf, "JPEG", quality=60)
+                    if buf.tell() < 20_000:
+                        thumb = Path(folder) / "thumb.jpg"
+                        thumb.write_bytes(buf.getvalue())
+                        os.chmod(thumb, 0o600)
+                        break
+        except video_tools.VideoError:
+            pass  # metadata still suffices for playback if a thumbnail cannot be decoded
+        attributes = [DocumentAttributeVideo(info.duration, info.width, info.height,
+            round_message=round_video, supports_streaming=True)]
+        if animation and not info.audio and not round_video:
+            attributes.append(DocumentAttributeAnimated())
+        return {"attributes": attributes, "supports_streaming": True, "video_note": round_video,
+                "mime_type": "video/mp4", "thumb": str(thumb) if thumb else None,
+                "nosound_video": not animation}
+
+
 @mcp.tool(annotations=WRITE)
 async def send_file(
     chat: str,
@@ -892,64 +992,124 @@ async def send_file(
     reply_to_message_id: int | None = None,
     schedule_at: str | None = None,
     whatsapp_file: str | None = None,
+    video_note: bool = False,
 ) -> dict:
-    """Send a file or photo FROM THE USER'S OWN Telegram account.
+    """Send a file, photo or playable video FROM THE USER'S OWN Telegram account.
     Only call this after showing the user the recipient, the file and the caption, and
     getting a clear yes. Give exactly ONE source:
-      url: a public web link to download and send (max 50 MB), or
+      url: a public web link to download and send (default max 2000 MB; configurable
+        up to 4000 MB for a verified Premium account). Streamed through private disk, or
       text_content + file_name: a file you write yourself (notes.txt, list.csv, page.html...), or
       from_chat + from_message_id: re-send the attachment of another message, without
-        the "forwarded from" label, or
+        the "forwarded from" label. Add file_name to rename it (downloads to disk,
+        default max 2000 MB); otherwise Telegram copies it without downloading, or
       whatsapp_file: the exact /home/app/store/ path from WhatsApp download_media
         (up to 2 GB; requires the optional WhatsApp store mount). Keeps the filename.
     caption: optional text under the file (max 1024 characters).
-    as_document: send pictures as files (full quality) instead of as photos.
+    as_document: send pictures/videos as files. Existing attachments are downloaded
+    and re-uploaded when changing their type. H.264 MP4 videos get duration, dimensions,
+    a thumbnail and streaming support automatically; unsupported formats stay files.
+    video_note: send a square MP4 of at most 60 seconds as a round video (no caption).
+    Existing round videos/GIFs retain their type when copied without renaming.
+    Large or oversized images are sent as documents automatically to keep memory bounded.
+    Only one disk transfer runs at once; a busy response means try again later.
+    Use chat='me' to save the file to the owner's Saved Messages.
     schedule_at: optional time to send it later, like send_message."""
     sources = [url is not None, text_content is not None,
                from_chat is not None or from_message_id is not None, whatsapp_file is not None]
     if sum(sources) != 1:
         raise ValueError("Give exactly one source: url, text_content, from_chat + from_message_id, or whatsapp_file.")
     caption = (caption or "").strip()
+    if video_note and (as_document or caption):
+        raise ValueError("Round videos cannot have captions or be sent as documents.")
     if len(caption) > 1024:
         raise ValueError("A caption can be at most 1024 characters.")
     when = _schedule_time(schedule_at) if schedule_at else None
-    _check_send_limit()
-    client = await tg()
-    entity = await resolve_chat(client, chat)
+    with _send_budget():
+        client = await tg()
+        entity = await resolve_chat(client, chat)
 
-    if url is not None:
-        data, name = await _fetch_url(url.strip())
-        file = io.BytesIO(data)
-        file.name = (file_name or name).strip()
-    elif text_content is not None:
-        if not text_content.strip():
-            raise ValueError("The file would be empty.")
-        file = io.BytesIO(text_content.encode("utf-8"))
-        file.name = (file_name or "note.txt").strip()
-    elif whatsapp_file is not None:
-        file = _read_whatsapp_file(whatsapp_file)
-    else:
-        if not (from_chat and from_message_id):
-            raise ValueError("Give both from_chat and from_message_id.")
-        src = await _get_message(client, await resolve_chat(client, from_chat), from_message_id)
-        if not _has_file(src):
-            raise ValueError("That message has no file or photo to send.")
-        file = src.media
-
-    try:
-        sent = await client.send_file(entity, file, caption=caption or None, schedule=when,
-                                      force_document=as_document, reply_to=reply_to_message_id)
-    except FloodWaitError as e:
-        raise _slow_down(e)
-    _record_sends()
+        size, video_hint, animation, round_hint, note = None, False, False, False, None
+        async with AsyncExitStack() as stack:
+            if url is not None:
+                limit = await _upload_limit(client, MAX_UPLOAD_MB)
+                item = await stack.enter_async_context(_fetch_url(url.strip(), limit))
+                video_hint = video_tools.is_video(name=item.path.name, mime=getattr(item, "mime", ""))
+                if file_name:
+                    target = item.path.with_name(safe_name(file_name))
+                    item.path.rename(target)
+                    item.path = target
+                file, size = str(item.path), item.size
+            elif text_content is not None:
+                if len(text_content) > MAX_EXTRACT_MB * MB:
+                    raise ValueError("Written file content is limited to 20 MB. Use a web link for large files.")
+                if not text_content.strip():
+                    raise ValueError("The file would be empty.")
+                encoded = text_content.encode("utf-8")
+                if len(encoded) > MAX_EXTRACT_MB * MB:
+                    raise ValueError("Written file content is limited to 20 MB of UTF-8 bytes. Use a web link for large files.")
+                file = io.BytesIO(encoded)
+                file.name = safe_name(file_name or "note.txt")
+                size = file.getbuffer().nbytes
+            elif whatsapp_file is not None:
+                file = _read_whatsapp_file(whatsapp_file)
+                size = Path(file).stat().st_size
+                limit = await _upload_limit(client, MAX_WHATSAPP_MB)
+                if size > limit:
+                    raise ValueError(f"That file is bigger than {limit // MB} MB for this account.")
+                await stack.enter_async_context(_transfers.slot(size))
+            else:
+                if not (from_chat and from_message_id):
+                    raise ValueError("Give both from_chat and from_message_id.")
+                src = await _get_message(client, await resolve_chat(client, from_chat), from_message_id)
+                if not _has_file(src):
+                    raise ValueError("That message has no file or photo to send.")
+                size = src.file.size
+                video_hint = video_tools.is_video(src)
+                animation = bool(getattr(src, "gif", False))
+                round_hint = bool(getattr(src, "video_note", False))
+                if file_name or as_document or video_note or (video_hint and not getattr(src, "video", False) and not round_hint and not animation):
+                    limit = await _upload_limit(client, MAX_ATTACHMENT_MB)
+                    item = await stack.enter_async_context(_download_attachment(client, src,
+                        file_name or src.file.name or ("video.mp4" if video_hint else "file" + (src.file.ext or "")), limit))
+                    file, size = str(item.path), item.size
+                else:
+                    file = src.media
+            options = {}
+            if isinstance(file, str):
+                if not as_document and (video_note or video_hint or video_tools.is_video(name=file)):
+                    folder = stack.enter_context(tempfile.TemporaryDirectory(prefix="telegram-video-"))
+                    try:
+                        if (video_note or round_hint) and caption:
+                            raise ValueError("Round videos cannot have captions.")
+                        options = await _video_upload(file, folder, round_video=video_note or round_hint, animation=animation)
+                    except video_tools.VideoBusy:
+                        raise
+                    except video_tools.VideoError as exc:
+                        if video_note:
+                            raise
+                        as_document, note = True, str(exc)
+                else:
+                    as_document = _document_upload(file, as_document)
+            if video_note and not options:
+                raise ValueError("Round videos require a square H.264 MP4 video source.")
+            try:
+                sent = await client.send_file(entity, file, caption=caption or None, schedule=when,
+                                              force_document=as_document, reply_to=reply_to_message_id, **options)
+            except FloodWaitError as e:
+                raise _slow_down(e)
+        _record_sends()
     log.debug("file %s", "scheduled" if when else "sent")
     out = {
         "sent": not when,
         "to": utils.get_display_name(entity),
         "message_id": sent.id,
         "what": _media_label(sent),
+        "size_bytes": size,
     }
     out["scheduled_for" if when else "time"] = _when(sent.date)
+    if note:
+        out["note"] = note
     return out
 
 
@@ -1000,16 +1160,16 @@ async def edit_message(chat: str, message_id: int, new_text: str) -> dict:
     limit = 1024 if _has_file(m) else 4096
     if len(new_text) > limit:
         raise ValueError(f"That's too long: at most {limit} characters here.")
-    _check_send_limit()
-    try:
-        await client.edit_message(entity, m.id, new_text)
-    except MessageNotModifiedError:
-        raise ValueError("The new text is the same as the old text.")
-    except (MessageEditTimeExpiredError, MessageAuthorRequiredError):
-        raise ValueError("Telegram doesn't allow editing this message anymore.")
-    except FloodWaitError as e:
-        raise _slow_down(e)
-    _record_sends()
+    with _send_budget():
+        try:
+            await client.edit_message(entity, m.id, new_text)
+        except MessageNotModifiedError:
+            raise ValueError("The new text is the same as the old text.")
+        except (MessageEditTimeExpiredError, MessageAuthorRequiredError):
+            raise ValueError("Telegram doesn't allow editing this message anymore.")
+        except FloodWaitError as e:
+            raise _slow_down(e)
+        _record_sends()
     log.debug("message edited")
     return {"edited": True, "chat": utils.get_display_name(entity), "message_id": m.id,
             "old_text": m.message or "", "new_text": new_text}
@@ -1025,17 +1185,17 @@ async def forward_messages(
     ids = [int(i) for i in message_ids][:20]
     if not ids:
         raise ValueError("Say which messages to forward (their ids from read_messages).")
-    _check_send_limit(len(ids))
-    client = await tg()
-    source = await resolve_chat(client, from_chat)
-    target = await resolve_chat(client, to_chat)
-    try:
-        sent = await client.forward_messages(target, ids, from_peer=source,
-                                             drop_author=hide_sender or None)
-    except FloodWaitError as e:
-        raise _slow_down(e)
-    sent = [s for s in (sent if isinstance(sent, list) else [sent]) if s]
-    _record_sends(len(sent))
+    with _send_budget(len(ids)):
+        client = await tg()
+        source = await resolve_chat(client, from_chat)
+        target = await resolve_chat(client, to_chat)
+        try:
+            sent = await client.forward_messages(target, ids, from_peer=source,
+                                                 drop_author=hide_sender or None)
+        except FloodWaitError as e:
+            raise _slow_down(e)
+        sent = [s for s in (sent if isinstance(sent, list) else [sent]) if s]
+        _record_sends(len(sent))
     log.debug("forwarded %s messages", len(sent))
     return {"forwarded": len(sent), "from": utils.get_display_name(source),
             "to": utils.get_display_name(target), "new_message_ids": [s.id for s in sent]}
@@ -1104,17 +1264,17 @@ async def _tell_assistant(command: str, message: str | None, schedule_at: str | 
         raise ValueError("The call assistant isn't set up yet: CALLER is missing in the "
                          "connector's .env (telegram-caller's setup.sh adds it).")
     when = _schedule_time(schedule_at) if schedule_at else None
-    _check_send_limit()
-    client = await tg()
-    target = await resolve_chat(client, CALLER)
-    text = f"{command} {(message or '').strip()}".strip()
-    if len(text) > 4096:
-        raise ValueError("That's too long for one message: at most about 4000 characters.")
-    try:
-        sent = await client.send_message(target, text, schedule=when)
-    except FloodWaitError as e:
-        raise _slow_down(e)
-    _record_sends()
+    with _send_budget():
+        client = await tg()
+        target = await resolve_chat(client, CALLER)
+        text = f"{command} {(message or '').strip()}".strip()
+        if len(text) > 4096:
+            raise ValueError("That's too long for one message: at most about 4000 characters.")
+        try:
+            sent = await client.send_message(target, text, schedule=when)
+        except FloodWaitError as e:
+            raise _slow_down(e)
+        _record_sends()
     log.info("%s %s", "scheduled" if when else "sent", command)
     return {"scheduled_for": _when(sent.date)} if when else {}
 

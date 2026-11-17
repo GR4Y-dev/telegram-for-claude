@@ -81,7 +81,8 @@ class DownloadSafety(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_reserved_mixed_or_empty_dns_is_refused(self):
         for ips in [[], ["127.0.0.1"], ["10.0.0.1"], ["169.254.169.254"],
-                    ["::1"], ["fc00::1"], ["93.184.216.34", "192.168.1.1"]]:
+                    ["::1"], ["fc00::1"], ["224.0.0.1"], ["ff02::1"],
+                    ["93.184.216.34", "192.168.1.1"]]:
             with self.assertRaises(ValueError):
                 module._check_public("example.test", self.addresses(*ips))
 
@@ -98,7 +99,8 @@ class DownloadSafety(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         with patch.object(loop, "getaddrinfo", AsyncMock(return_value=self.addresses("93.184.216.34"))) as dns, \
              patch.object(module.httpx, "AsyncClient", client):
-            data, name = await module._fetch_url("https://example.test/note.txt")
+            async with module._fetch_url("https://example.test/note.txt") as item:
+                data, name = item.path.read_bytes(), item.path.name
         self.assertEqual((data, name), (b"hello", "note.txt"))
         dns.assert_awaited_once()
         self.assertEqual(requests[0].url.host, "93.184.216.34")
@@ -119,18 +121,74 @@ class DownloadSafety(unittest.IsolatedAsyncioTestCase):
                 self.addresses("93.184.216.34"), self.addresses("127.0.0.1")])), \
              patch.object(module.httpx, "AsyncClient", client):
             with self.assertRaises(ValueError):
-                await module._fetch_url("https://example.test/redirect")
+                async with module._fetch_url("https://example.test/redirect"):
+                    self.fail("private redirect accepted")
         self.assertEqual(len(requests), 1)
 
     async def test_credentials_and_non_web_schemes_are_rejected(self):
         loop = asyncio.get_running_loop()
         with patch.object(loop, "getaddrinfo", AsyncMock()) as dns:
-            for url in ["https://user:pass@example.test/file", "file:///etc/passwd", "ftp://example.test"]:
+            for url in ["https://user:pass@example.test/file", "https://@example.test/file",
+                        "file:///etc/passwd", "ftp://example.test"]:
                 with self.assertRaises(ValueError):
-                    await module._fetch_url(url)
+                    async with module._fetch_url(url):
+                        self.fail("invalid URL accepted")
             dns.assert_not_awaited()
+
+    async def test_all_redirect_hops_and_original_tls_port_are_checked(self):
+        requests = []
+        def respond(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(302, headers={"location": "https://second.test:8443/file.txt"})
+            return httpx.Response(200, content=b"ok")
+        real_client = httpx.AsyncClient
+        def client(**kwargs):
+            return real_client(transport=httpx.MockTransport(respond), **kwargs)
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "getaddrinfo", AsyncMock(return_value=self.addresses("93.184.216.34"))) as dns, \
+             patch.object(module.httpx, "AsyncClient", client):
+            async with module._fetch_url("https://first.test/file") as item:
+                self.assertEqual(item.path.read_bytes(), b"ok")
+        self.assertEqual(dns.await_count, 2)
+        self.assertEqual(requests[1].headers["host"], "second.test:8443")
+        self.assertEqual(requests[1].extensions["sni_hostname"], "second.test")
+        self.assertEqual(requests[1].url.port, 8443)
+
+
+class SendSafety(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_sends_reserve_capacity_and_release_on_cancellation(self):
+        entered = asyncio.Event()
+        async def waiting():
+            with module._send_budget():
+                entered.set()
+                await asyncio.sleep(60)
+        module._sent_times.clear()
+        with patch.object(module, "MAX_SENDS_PER_HOUR", 1):
+            task = asyncio.create_task(waiting())
+            await entered.wait()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Safety limit"):
+                    with module._send_budget():
+                        self.fail("parallel send bypassed quota")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            with module._send_budget():
+                pass
+        self.assertEqual(module._pending_sends, 0)
+
+    async def test_transcription_response_does_not_disclose_provider_body(self):
+        response = SimpleNamespace(status_code=403, text="synthetic-private-provider-detail")
+        @asynccontextmanager
+        async def client(**kwargs):
+            yield SimpleNamespace(post=AsyncMock(return_value=response))
+        with patch.object(module.httpx, "AsyncClient", client):
+            with self.assertRaises(RuntimeError) as raised:
+                await module._speech_to_text(b"audio", "voice.ogg", None)
+        self.assertIn("403", str(raised.exception))
+        self.assertNotIn("synthetic-private", str(raised.exception))
 
 
 if __name__ == "__main__":
     unittest.main()
-
