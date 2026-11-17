@@ -19,7 +19,7 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 
 ## Features
 
-**Connector (18 tools)**
+**Connector (20 tools)**
 - Read chats, also far back by date, and search across all of them (without marking them as read)
 - Open attachments: photos and screenshots, PDFs (scanned ones too), Word, Excel, text and code files
 - Watch videos through up to 8 timed still frames and an audio transcript; ask for a specific time range
@@ -29,6 +29,7 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 - Send files up to **2000 MB** from a link; Premium accounts can opt into **4000 MB**
 - Send H.264 MP4s as playable streaming videos, or ask to send the original as a file
 - Check attachment details without opening them, or rename a file while re-sending it
+- Download original Telegram files to your PC through private, expiring links, including videos for editing
 - Edit your own messages, forward, delete, mark as read
 - `call_me` / `text_me`: your assistant rings you or texts you from its own account, now or later
 - `update_server`: "update the server" updates everything right away
@@ -63,6 +64,31 @@ Persian ([Dilara](docs/samples/persian-dilara.mp3), [Farid](docs/samples/persian
 With the WhatsApp connector on the same server, `send_file` can send a file already saved
 by its `download_media` tool. Enable the read-only store mount once; setup and updates keep
 it enabled. See [the exact commands and permissions](telegram-connector/README.md#send-files-downloaded-by-whatsapp-optional).
+
+### Edit a Telegram video on your PC
+
+With this connector enabled in Claude Code on your PC, ask: **"Download the original
+video from that Telegram message into this project so we can edit it."** Claude uses
+`get_download_link`, then runs the returned curl command to save the actual file locally.
+In Windows PowerShell, use `curl.exe` instead of `curl`. In Claude apps without a shell,
+tap the returned link to save the file yourself. Photos use the largest Telegram version;
+documents, voice messages, audio, GIFs and round videos also work.
+
+| Tool | What it does |
+|---|---|
+| `get_download_link(chat, message_id)` | Exports the original attachment and returns a private HTTPS link, file details, expiry and download command |
+| `revoke_download_links()` | Disables all exported links and deletes cached exports; downloads already started may finish |
+
+| Download setting in connector `.env` | Default |
+|---|---|
+| `DOMAIN` | Your existing Cloudflare Tunnel hostname; required, never guessed |
+| `LINK_MINUTES` | 30 minutes; maximum 1440 (24 hours) |
+| `EXPORT_MAX_MB` | 4000 MB total export storage |
+
+Anyone with a link can download its file. Each link allows five GET requests, including
+retries and resumes; at most five links stay active. Oldest links are removed first when
+needed, with a notice. The existing attachment limit and disk reserve still apply.
+See [downloads and deployment checks](telegram-connector/README.md#download-original-files-to-your-pc).
 
 ## How it works
 
@@ -248,8 +274,9 @@ The [security review](SECURITY-REVIEW.md) explains the fixes, checks and remaini
 
 - **Cut Claude off any time:** Telegram → Settings → Devices → end "Claude connector"
   (and "AI assistant" for the call account), or remove the connector in claude.ai.
-- The connector address contains a long random secret; every other address returns "Not Found".
-  If it leaks, make a new one (command in `telegram-connector/README.md`).
+- The connector address contains a long random secret. Exported file links use separate,
+  short-lived tokens and never reveal that secret. Unknown/expired file links return
+  "Not Found". If the connector address leaks, make a new one (command in `telegram-connector/README.md`).
 - Logins live only on your server (`data/`, `.env`, a Docker volume), readable only by root.
 - The call assistant talks only to your main account and can't send anything during calls.
 - **Large files use temporary disk space.** One transfer runs at a time, leaving at least
@@ -272,6 +299,7 @@ python -m unittest discover -s tests -p 'test_chat.py'
 python -m unittest discover -s tests -p 'test_assistant_*.py'
 python -m unittest discover -s tests -p 'test_security.py'
 python -m unittest discover -s tests -p 'test_transfers.py'
+python -m unittest discover -s tests -p 'test_download_links.py'
 python tests/test_video.py
 python -m unittest discover -s tests -p 'test_video_chat.py'
 ```

@@ -91,6 +91,7 @@ avoid a server download and are not held to the extraction limit.
 | Send an existing WhatsApp download | 2000 MB |
 | Extract an attachment into Claude's context | 20 MB; existing parser limits still apply |
 | Read a video | 2000 MB downloaded; 8 frames, up to 5 minutes of audio per request, 2-hour source duration |
+| Export an original attachment to the PC | 2000 MB per file; 4000 MB total exports, at most 5 links |
 | Transcribe through the external speech service | 25 MB |
 
 Limits use 1024 × 1024 bytes per MB. Set the relevant transfer setting to at most 4000
@@ -121,6 +122,65 @@ It also shows the caption without downloading, decoding or transcribing. Files a
 The 60,000-character limit, 50 PDF text pages / 5 scanned pages, 25-megapixel image limit
 and Office archive limits stay unchanged. Oversized pictures are sent as full-quality
 documents to avoid decoding them during upload.
+
+## Download original files to your PC
+
+Ask Claude Code on your PC: **"Get the original video from that Telegram message and
+save it in this project so we can edit it."** It can use the new tool, run the returned
+download command, and then edit the local file with the tools on your PC. This works
+with Claude Code CLI 2.1.286; no CLI changes are needed. The connector must already be
+connected to that Claude Code session. Apps without a shell show a link you can tap.
+
+| Tool | Result |
+|---|---|
+| `get_download_link(chat, message_id)` | Private HTTPS link, safe filename, byte size, MIME type, UTC expiry and a ready-to-run curl command |
+| `revoke_download_links()` | Immediately disables all links, invalidates pending exports and deletes their cached files |
+
+Videos, round videos, GIFs, photos at the largest size Telegram holds, documents,
+voice messages and audio are supported. No conversion or thumbnail extraction occurs.
+For a photo Telegram has compressed, its largest stored version is what can be exported.
+Filename characters that are unsafe in a shell or on Windows are replaced.
+
+The returned command looks like this (use the real link from the tool):
+
+```sh
+curl -fL -o "movie.mp4" "https://telegram.example.com/files/<token>/movie.mp4"
+```
+
+In Windows PowerShell, use `curl.exe -fL -o "movie.mp4" "<link>"`, or
+`Invoke-WebRequest -Uri "<link>" -OutFile "movie.mp4"`. To resume a partial file with
+curl, add `-C -`. Each GET, including a Range request, retry or invalid range, uses one
+of the five attempts. HEAD checks do not count. A link is valid for 30 minutes by default;
+request a fresh one if it expires. Downloads already started may finish after expiry or
+revocation; their files are deleted when the response ends (including cancellation).
+Slow responses have a size-based deadline, so they cannot hold disk space indefinitely.
+
+Exports live in `DATA_DIR/exports` (0700 folder, 0600 files on Linux), with metadata only
+in memory. The same Transfers slot, attachment byte ceiling and disk reserve apply,
+including during every write on the data volume. Total export storage is capped by
+`EXPORT_MAX_MB`, including files still being served; at most five cached links are kept.
+Oldest links are evicted first, and the result tells you how many were removed. Unknown-size
+attachments reserve their maximum permitted size before downloading. If active responses
+still hold too much space, a new export gets a busy response. Partial downloads are removed
+on failure or cancellation. A sweep runs every 30 seconds; requests enforce expiry immediately.
+Restarts invalidate all links and remove old exports and abandoned partial downloads.
+Run one connector process/worker for each data volume.
+
+**Anyone holding the link can download the file until expiry or revocation.** Keep links
+private; they grant access to that file without the MCP secret. Replies use attachment,
+no-store, nosniff, no-referrer and restrictive CSP headers. Uvicorn access logging is
+disabled and filtered; do not enable proxy/debug request logging for these URLs.
+Revocation cannot recall a file someone has already downloaded. No tools are added to
+the caller or guests; guests remain unable to use the owner's connector.
+
+After deployment, check that `.env` contains `DOMAIN=telegram.your-domain.com` (your existing
+tunnel hostname, without `https://` or a path), then recreate the connector with
+`docker compose up -d --build` so Compose passes DOMAIN and the new settings through.
+Keep the tunnel's hostname route pointed at `telegram:8000`, including `/files/*`, and
+make sure Cloudflare cache rules do not override `no-store`. Check any Cloudflare/other
+proxy logging or analytics that might record full URLs. Refresh Claude's connector tools,
+download a small attachment, test a resume, then revoke its link and check it returns 404.
+The MCP address stays `https://<DOMAIN>/<MCP_SECRET>/mcp`.
 
 ## Reading and sending videos
 
@@ -172,6 +232,9 @@ The caller already installs FFmpeg during setup. No deployment is performed by t
 | `MAX_UPLOAD_MB` | Biggest file Claude may send from a web link (default 2000; up to 4000 with Premium) |
 | `MAX_WHATSAPP_MB` | Biggest WhatsApp-downloaded file Claude may send (default 2000; up to 4000 with Premium) |
 | `DISK_RESERVE_MB` | Free space downloads must leave on the temporary-file filesystem (default/minimum 2048) |
+| `DOMAIN` | Existing public tunnel hostname used for download links; hostname only, required for exports |
+| `LINK_MINUTES` | Download link lifetime, default 30 minutes, clamped to 1–1440 |
+| `EXPORT_MAX_MB` | Total private export storage under DATA_DIR, default 4000 MB, minimum 1; oldest links removed first |
 | `COMPOSE_FILE` | Optional Compose files, e.g. `docker-compose.yml:docker-compose.whatsapp.yml` |
 | `WHATSAPP_STORE_VOLUME` | Existing WhatsApp volume name when enabled (default `whatsapp-connector_whatsapp-store`) |
 

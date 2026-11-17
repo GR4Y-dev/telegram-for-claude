@@ -1,5 +1,49 @@
 # Security review
 
+## Download links: capability URL boundary
+
+`get_download_link` exports only an attachment requested through the authenticated-by-path
+owner connector. The resulting `/files/<token>/<filename>` URL is a separate bearer
+capability: **anyone holding it can download that file**, without authenticating to
+Telegram or knowing `MCP_SECRET`. It must be treated as private. The filename is cosmetic;
+only a token digest selects a server-generated disk path. Tokens use `secrets.token_urlsafe(32)`
+and fixed-size digest comparisons use `secrets.compare_digest`. Neither filenames nor
+request paths can select arbitrary files. Unknown, expired and revoked links return the
+same plain 404. These tools are not mirrored into the caller; guest sessions continue to
+deny all Telegram MCP tools.
+
+Defaults are 30 minutes, five GET requests per link (including retries/ranges), five
+cached links and 4000 MB total export bytes. HEAD is free. Lifetime is capped at 24 hours.
+Oldest links are removed to make room, with a notice in the tool result. Transfers retain
+the attachment ceiling, shared single-transfer slot, deadlines and disk reserve, checked
+on the export filesystem before and during writes. Exports and partials live below the
+private DATA_DIR export folder; Linux permissions are 0700/0600 and metadata is memory-only.
+Errors, timeouts and cancellation clean partial files; a 30-second sweep and startup cleanup
+remove stale files. Restart invalidates all previous links. Use one worker per data volume.
+
+`revoke_download_links` immediately disables links, including pending exports, and deletes
+idle files. Already-started responses may finish; their files remain counted against the
+storage cap until response completion/cancellation/size-based timeout, then are deleted.
+The fifth GET similarly retains its file only until existing responses finish. Neither
+expiry nor revocation recalls bytes already obtained by a recipient.
+
+Responses stream from disk with Range/HEAD support and explicit attachment disposition
+(RFC 5987 filename), safe MIME allowlist or octet-stream, `nosniff`, `no-store`,
+`no-referrer`, and a sandboxed CSP forbidding script/content execution. Only GET and HEAD
+are routed; there is no directory listing. Filenames are also sanitized for the returned
+shell command. Links never include the MCP secret. Uvicorn access logging is explicitly
+off and filtered even if its log level changes; export errors omit provider details.
+No token or full link is deliberately logged or persisted as metadata. Tool responses and
+the owner's shell history do contain the capability URL. Cloudflare and any other proxy
+are separate trust boundaries: operators must avoid full-URL logs and cache overrides for
+`/files/*`; application headers alone cannot enforce those external settings.
+
+`test_download_links` exercises the real FastMCP ASGI application with fake Telegram files:
+tool calls, downloads and ranges, HEAD, expiry/count/revoke, traversal, response headers,
+log suppression, failure/cancellation cleanup and byte/disk caps. Live tunnel/cache/log
+configuration is not tested locally; validate it after deployment. No new dependencies
+or changes to the Claude Code 2.1.286 contract are introduced.
+
 ## November 17 follow-up: large files, video and call recovery
 
 Review scope: connector tools/downloads/parsers, caller commands and process handling,
