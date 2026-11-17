@@ -2,6 +2,7 @@
 No real credentials, AI requests or Telegram messages. Invoked explicitly by CI.
 """
 import asyncio
+import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -11,6 +12,8 @@ import sys
 import tempfile
 import threading
 import urllib.request
+import struct
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "telegram-caller"))
 from guest_runtime import GuestRuntime
@@ -76,7 +79,15 @@ async def main():
         runtime.base_args = test_args
         engine = await runtime.conversation(7,22,1,None,"Synthetic guest test.","claude-haiku-4-5-20251001")
         try:
-            first = await engine.ask("Synthetic first turn")
+            # Same content-block protocol used by owner video chat; no real media or provider.
+            def chunk(kind, data):
+                return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+            png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+                   + chunk(b"IDAT", zlib.compress((b"\0" + b"\xff\0\0" * 16) * 16)) + chunk(b"IEND", b""))
+            first = await engine.ask([{"type": "text", "text": "Synthetic first turn"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                              "data": base64.b64encode(png).decode()}}])
+            assert any(block.get("type") == "image" for block in requests[0]["messages"][0]["content"])
             process = engine.proc
             second = await engine.ask("Synthetic second turn")
             assert first[0] == "Synthetic reply 1" and second[0] == "Synthetic reply 2"
@@ -95,10 +106,11 @@ async def main():
             tools = {tool["name"] for request in requests for tool in request.get("tools",[])}
             assert tools <= {"WebSearch","WebFetch","web_search"}, tools
             assert "WebFetch" in tools and tools & {"WebSearch","web_search"}, tools
-            print("CLI 2.1.286: process reuse, restart/resume, guest separation, web-only tools, cleanup")
+            print("CLI 2.1.286: image content blocks, process reuse, restart/resume, guest separation, web-only tools, cleanup")
         finally:
             await engine.close()
             server.shutdown()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

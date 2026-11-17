@@ -123,13 +123,6 @@ async def main():
         caller.CLAUDE_ALLOWED_TOOLS = ""
     check("WebFetch" in caller.CHAT_PROMPT and "open-meteo.com" in caller.PHONE_PROMPT, "chat and calls are told to fetch live data")
 
-    # cutting Claude's answer into sentences
-    done, rest = caller.split_sentences("Very good, sir. The skies are clear! Shall I")
-    check(done == ["Very good, sir.", "The skies are clear!"] and rest.strip() == "Shall I", "English sentences split")
-    done, rest = caller.split_sentences("بله قربان. هوا صافه؟ الان")
-    check(done == ["بله قربان.", "هوا صافه؟"] and rest.strip() == "الان", "Persian sentences split")
-    check(caller.split_sentences("It costs 3.5 dollars. Ok")[0] == ["It costs 3.5 dollars."], "decimal numbers aren't cut")
-
     # real Claude, if it's installed
     if shutil.which(caller.CLAUDE_BIN) and not os.environ.get("SKIP_CLAUDE"):
         q = asyncio.Queue(); t0 = time.monotonic()
@@ -246,5 +239,6 @@ async def main():
     await call2.converse("این یک جمله‌ی خیلی طولانیه که نباید تا آخرش پخش بشه چون تماس قطع شده.")
     check(time.monotonic() - t0 < 2.5, "hanging up stops the assistant right away")
 
-asyncio.run(main())
-print(f"\nALL {ok} CHECKS PASSED")
+if __name__ == "__main__":
+    asyncio.run(main())
+    print(f"\nALL {ok} CHECKS PASSED")

@@ -37,6 +37,28 @@ Every chat and call turn includes the current time in `TIMEZONE` and UTC. Set `T
 Replies use the existing Claude Code login and voice notes use the existing transcription key.
 Claude login or usage-limit problems produce a retry message. No new keys are required.
 
+### Videos in owner chat
+
+Send a video, round video or GIF directly to the assistant, optionally with a question
+in the caption. Video documents work too. It downloads at most 200 MB to private disk,
+then supplies Claude with four stills spaced across the video and a transcript of up to
+the first five minutes of audio, with duration, resolution and frame times. The source
+may be at most two hours long. For larger files, eight frames, or a specific time range,
+ask Claude to use the connector's `read_attachment` tool instead.
+
+Video processing uses the connector's shared helper from the same checkout: one shared video
+job across both services, low priority, one codec/filter thread, a 60-second processing deadline
+and Linux memory/CPU limits. The normal 2 GB disk reserve applies. Video work is refused
+when a call is already active. Files are removed on success, error or cancellation.
+Keep FFmpeg and ffprobe installed; without them the assistant explains how to continue.
+No video codec packages are installed through pip. Audio uses the existing transcription
+key. Frames/transcripts may be retained in the normal Claude conversation history and
+sent to the configured AI/speech providers, just like other conversation content.
+
+Video captions and transcripts never run saved-fact/reminder or guest-access commands;
+video turns also deny calling, texting and updating tools. Ask for actions in a separate
+direct text or voice message. Guests cannot request video downloads or decoding.
+
 ## Saved facts and reminders
 
 Only direct private messages from your configured owner account can change saved facts and
@@ -57,6 +79,7 @@ Forwarded text and voice notes are treated as quoted content and do not run comm
 | `Remind me every Wednesday at 8am to exercise` | Weekly on Wednesday |
 | `/remind weekly 08:00 \| Review tasks` | Weekly on today's weekday |
 | `/reminders` or `/tasks` | Lists unfinished tasks, dates and IDs |
+| `/agenda` | Lists today's and overdue reminders in `TIMEZONE`, including notified tasks awaiting Done; no Claude usage |
 | `/snooze 2 20` or `snooze #2 for 20 minutes` | Postpones reminder #2 by 20 minutes |
 | `/done 2` or `done #2` | Removes reminder #2, including its repeating series |
 | `/help` | Shows the command examples |
@@ -149,7 +172,10 @@ keeps the previous model for rollback until you choose to remove it. Returning t
 The 2.1.286 stream protocol was checked with two turns through the exact released CLI
 and a local fake API. The live server wrapper, subscription login and actual call latency
 still need a server check. If the stream exits before producing any protocol output,
-the call falls back to per-turn mode. Partial responses and timeouts are not replayed.
+the call falls back for that turn, then tries a fresh stream on the following turn.
+Two consecutive startup failures select per-turn mode for the rest of the call.
+Partial responses and timeouts are not replayed. Diagnostics report fixed causes,
+process status and byte/event counts without private content.
 See [performance notes](../PERFORMANCE.md) for measured results and remaining checks.
 ## Letting other people use your assistant
 

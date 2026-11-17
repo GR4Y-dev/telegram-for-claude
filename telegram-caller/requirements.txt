@@ -4,7 +4,7 @@ ntgcalls==3.0.6
 telethon==1.45.0
 edge-tts==7.3.1
 kokoro-onnx==0.6.1
-httpx
-numpy
-tzdata
+httpx==0.28.1
+numpy==2.5.4
+tzdata==2026.6
 webrtcvad-wheels==2.0.14.post1

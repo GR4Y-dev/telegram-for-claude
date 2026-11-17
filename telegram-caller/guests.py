@@ -255,11 +255,14 @@ class Guests:
             if (text.startswith("/") or command(text)) and not forwarded:
                 await self.send(guest, generation, "That command is reserved for the owner. You can use /new to reset your conversation.")
                 return
+            if self.api.video_tools.is_video(getattr(event, "message", event)):
+                await self.send(guest, generation, "Video processing is available only to the owner. Please send text or a voice note.")
+                return
             if event.voice:
                 document = event.message.document
                 if document.size > self.api.MAX_VOICE_BYTES:
                     raise ValueError("Voice note too large")
-                data = await asyncio.wait_for(event.download_media(file=bytes), 30)
+                data = await asyncio.wait_for(self.api.download_voice(event), 30)
                 if not data or len(data) > self.api.MAX_VOICE_BYTES:
                     raise ValueError("Voice note too large")
                 # Decode ourselves: Telegram duration metadata is not a quota boundary.
@@ -306,6 +309,24 @@ class Guests:
         self.a.call_target = row["guest"]
         self.job, self.person = self.a.call_job, row["guest"]
 
+    async def call_turn(self, call, guest, generation, text, sentences):
+        if not self.store.charge(self.owner, guest, generation, messages=1):
+            await self.exhausted(guest, generation)
+            call.ended.set()
+            return "[END]", call.session_id
+        if call.conversation is None:
+            call.conversation = await self.runtime.conversation(self.owner, guest, generation,
+                call.session_id, self.prompt(phone=True), self.api.CLAUDE_MODEL)
+        try:
+            result = await call.conversation.ask(self.context(text), sentences)
+        except BaseException:
+            # ask() already removed the container. Never reuse its retired cleanup
+            # identity: the next turn needs a new container and current session flags.
+            call.conversation = None
+            raise
+        self.store.save_session(self.owner, guest, generation, result[1])
+        return result
+
     async def call(self, row, outgoing, opening):
         guest, generation = row["guest"], row["generation"]
         reservation = self.store.reserve_call(self.owner, guest, generation)
@@ -324,16 +345,7 @@ class Guests:
                 call = self.a.call = self.api.Call(self.a.calls, guest)
                 call.session_id = row["session"]
                 async def model_turn(text, sentences):
-                    if not self.store.charge(self.owner, guest, generation, messages=1):
-                        await self.exhausted(guest, generation)
-                        call.ended.set()
-                        return "[END]", call.session_id
-                    if call.conversation is None:
-                        call.conversation = await self.runtime.conversation(self.owner, guest, generation,
-                            call.session_id, self.prompt(phone=True), self.api.CLAUDE_MODEL)
-                    result = await call.conversation.ask(self.context(text), sentences)
-                    self.store.save_session(self.owner, guest, generation, result[1])
-                    return result
+                    return await self.call_turn(call, guest, generation, text, sentences)
                 call.model_turn = model_turn
                 call.persian = self.api.is_persian(opening)
                 await self.a.calls.record(guest, self.api.RecordStream(True, self.api.AUDIO))

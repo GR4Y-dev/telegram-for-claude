@@ -156,6 +156,25 @@ class CommandTests(unittest.TestCase):
         self.store.remember.side_effect = ValueError("Memory limit reached")
         self.assertEqual(self.handle("/remember a fact"), "Memory limit reached")
 
+    def test_agenda_uses_local_midnight_and_keeps_overdue_and_notified_items(self):
+        self.now = datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)  # Nov 3 in Istanbul
+        def row(ident, day, hour):
+            return {"id": ident, "text": f"Task {ident}", "timezone": "Europe/Istanbul", "repeat": "once",
+                    "next_due": datetime(2026, 11, day, hour, tzinfo=timezone.utc).timestamp()}
+        self.store.reminders.return_value = [row(1, 1, 12), row(2, 3, 20), row(3, 3, 21),
+            dict(row(4, 2, 12), next_due=None)]
+        answer = self.handle("/agenda")
+        for ident in (1, 2, 4):
+            self.assertIn(f"Task {ident}", answer)
+        self.assertNotIn("Task 3", answer)
+        self.assertIn("awaiting Done", answer)
+        self.store.reminders.assert_called_once_with(7)
+        self.store.add_reminder.assert_not_called()
+        self.store.delivered.assert_not_called()
+
+    def test_agenda_empty_does_not_claim_no_future_reminders(self):
+        self.assertIn("/reminders shows future ones", self.handle("/agenda"))
+
 
 if __name__ == "__main__":
     unittest.main()

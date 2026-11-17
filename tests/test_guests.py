@@ -18,13 +18,16 @@ from guest_runtime import GuestRuntime, GuestUnavailable
 import guest_runtime
 from guests import Guests, command
 from telethon.tl.types import User, PeerUser
+from claude_stream import StreamFailure
 
 
 def event(text="", sender=22, private=True):
+    async def download(file):
+        file.write(b"audio")
     return SimpleNamespace(raw_text=text, sender_id=sender, is_private=private, voice=False,
         fwd_from=None, reply=AsyncMock(), delete=AsyncMock(), get_reply_message=AsyncMock(return_value=None),
-        download_media=AsyncMock(return_value=b"audio"),
-        message=SimpleNamespace(document=SimpleNamespace(size=50, attributes=[])))
+        download_media=AsyncMock(side_effect=download),
+        message=SimpleNamespace(document=SimpleNamespace(size=5, attributes=[])))
 
 
 class StoreTests(unittest.TestCase):
@@ -221,6 +224,21 @@ class GuestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.a.call_job,first)
         first.cancel()
         await asyncio.gather(first, return_exceptions=True)
+
+    async def test_failed_call_turn_uses_a_new_container_next_turn(self):
+        call = SimpleNamespace(conversation=self.engine, session_id="last-guest-session", ended=asyncio.Event())
+        self.engine.ask.side_effect = StreamFailure("eof_before_result")
+        with self.assertRaises(StreamFailure):
+            await self.g.call_turn(call, 22, 1, "first", None)
+        self.assertIsNone(call.conversation)
+        self.g.runtime.conversation.assert_not_awaited()
+        fresh = SimpleNamespace(ask=AsyncMock(return_value=("answer", "new-guest-session")))
+        self.g.runtime.conversation.return_value = fresh
+        result = await self.g.call_turn(call, 22, 1, "next", None)
+        self.assertEqual(result[1], "new-guest-session")
+        self.assertEqual(self.g.runtime.conversation.await_args.args[:4], (7, 22, 1, "last-guest-session"))
+        self.assertEqual(self.g.store.get(7, 22)["session"], "new-guest-session")
+        self.assertEqual(self.engine.ask.await_count, 1)
 
 
 class PolicyTests(unittest.IsolatedAsyncioTestCase):
