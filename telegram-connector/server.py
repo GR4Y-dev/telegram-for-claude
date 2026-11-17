@@ -8,7 +8,7 @@ will happen, and wait for your OK, before it sends, edits, forwards or deletes.
 
 The address only works with the long secret in it:
     https://<your-domain>/<MCP_SECRET>/mcp
-Every other address returns "Not Found".
+Short-lived file exports use separate capability URLs under /files/.
 """
 
 import asyncio
@@ -44,7 +44,8 @@ from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (Channel, Chat, User, UserStatusLastMonth, UserStatusLastWeek,
                                UserStatusOffline, UserStatusOnline, UserStatusRecently,
                                DocumentAttributeVideo, DocumentAttributeAnimated)
-from transfers import MB, Transfers, _check_public, download_url, safe_name
+from transfers import MB, Transfers, TransferError, _check_public, download_url, safe_name
+from download_links import DownloadLinks, public_origin
 import video_tools
 
 # ---------------------------------------------------------------- settings
@@ -59,6 +60,10 @@ MAX_UPLOAD_MB = max(1, min(4000, int(os.environ.get("MAX_UPLOAD_MB", "2000"))))
 MAX_EXTRACT_MB = 20       # Never raise parser input budgets with transfer settings.
 DISK_RESERVE_MB = max(2048, int(os.environ.get("DISK_RESERVE_MB", "2048")))
 _transfers = Transfers(DISK_RESERVE_MB * MB)
+DOMAIN = os.environ.get("DOMAIN", "").strip()
+LINK_MINUTES = max(1, min(1440, int(os.environ.get("LINK_MINUTES", "30"))))
+EXPORT_MAX_MB = max(1, int(os.environ.get("EXPORT_MAX_MB", "4000")))
+_download_links = DownloadLinks(DATA_DIR / "exports", EXPORT_MAX_MB * MB, LINK_MINUTES)
 WHATSAPP_STORE = Path("/whatsapp-store")
 # WhatsApp files are streamed from disk, so they can go up to Telegram's own 2 GB limit.
 MAX_WHATSAPP_MB = max(1, min(4000, int(os.environ.get("MAX_WHATSAPP_MB", "2000"))))
@@ -625,6 +630,65 @@ WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                         idempotentHint=False, openWorldHint=True)
 DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                               idempotentHint=False, openWorldHint=True)
+
+
+@mcp.custom_route("/files/{token}/{filename}", methods=["GET", "HEAD"])
+async def download_file(request):
+    return await _download_links.serve(request)
+
+
+def create_app():
+    """Keep FastMCP's transport/session lifecycle and add export housekeeping."""
+    app = mcp.streamable_http_app()
+    transport_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with _download_links.lifespan(), transport_lifespan(app):
+            yield
+
+    app.router.lifespan_context = lifespan
+    app.router.redirect_slashes = False
+    return app
+
+
+@mcp.tool(annotations=WRITE)
+async def get_download_link(chat: str, message_id: int) -> dict:
+    """Get the original attachment when the user wants the actual file on their
+    computer to edit, keep or open: video, round video, GIF, full-size photo,
+    document, voice or audio. In Claude Code, download the returned HTTPS link
+    with curl (curl.exe in Windows PowerShell) or Invoke-WebRequest, then work
+    with the local file. In apps without a shell, give the user the link to tap.
+    Only export files the user asked for. Links are private bearer credentials,
+    expire after 30 minutes by default, and allow 5 GETs including retries/ranges.
+    Oldest links may be removed to respect storage limits. Never send these links
+    to someone else without the user's explicit request. No Telegram message is sent.
+    """
+    origin = public_origin(DOMAIN, SECRET)
+    try:
+        client = await tg()
+        entity = await resolve_chat(client, chat)
+        message = await _get_message(client, entity, message_id)
+        if not _has_file(message):
+            raise TransferError("That message has no file. Use read_messages to find an attachment.")
+        return await _download_links.create(client, message, _transfers, MAX_ATTACHMENT_MB * MB, origin, SECRET)
+    except TransferError:
+        raise
+    except Exception:
+        # Provider exception text can contain private details; FastMCP logs errors.
+        raise TransferError("Could not export that attachment. Check the chat/message, Telegram connection "
+                            "and free disk space, then try again.") from None
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def revoke_download_links() -> dict:
+    """Immediately disable all exported download links when the user asks.
+    Deletes their cached files; downloads already started may finish. Also
+    invalidates exports currently downloading. Does not delete Telegram messages."""
+    try:
+        return {"revoked": _download_links.revoke(), "note": "All download links disabled. Downloads already started may finish."}
+    except OSError:
+        raise TransferError("Links disabled, but file cleanup failed. Check export storage permissions.") from None
 
 
 @mcp.tool(annotations=READ)
@@ -1291,4 +1355,5 @@ async def mark_read(chat: str) -> dict:
 
 if __name__ == "__main__":
     log.info("Telegram connector listening on port %s", PORT)
-    mcp.run(transport="streamable-http")
+    import uvicorn
+    uvicorn.run(create_app(), host="0.0.0.0", port=PORT, log_level="warning", access_log=False)
