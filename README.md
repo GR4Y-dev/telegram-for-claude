@@ -22,9 +22,13 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 **Connector (18 tools)**
 - Read chats, also far back by date, and search across all of them (without marking them as read)
 - Open attachments: photos and screenshots, PDFs (scanned ones too), Word, Excel, text and code files
+- Watch videos through up to 8 timed still frames and an audio transcript; ask for a specific time range
 - Write out voice messages, round videos and audio (Persian, English, Turkish and more)
 - Profiles: bio, birthday, last seen, profile picture
 - Send messages and files (from a link, written by Claude, another chat, or WhatsApp downloads), now or **scheduled**
+- Send files up to **2000 MB** from a link; Premium accounts can opt into **4000 MB**
+- Send H.264 MP4s as playable streaming videos, or ask to send the original as a file
+- Check attachment details without opening them, or rename a file while re-sending it
 - Edit your own messages, forward, delete, mark as read
 - `call_me` / `text_me`: your assistant rings you or texts you from its own account, now or later
 - `update_server`: "update the server" updates everything right away
@@ -36,6 +40,7 @@ Everything runs on your own server. Your Telegram login and keys never leave it.
 - Saves facts you explicitly ask it to remember, and sends one-time or repeating reminders
   with snooze and done commands, even when Claude's usage limit is reached
 - Transcribes voice notes and replies in text; chats and calls know the current local and UTC time
+- Understands videos you send to its private chat (up to 200 MB, four frames and up to five minutes of audio)
 - Turn-based talk: speech-to-text → Claude Code → speech, with a soft tick while it thinks
 - Starts speaking Claude's first sentence while the rest is still being written
 - Can search the web and read your Telegram during a call (never send)
@@ -204,6 +209,7 @@ Send these directly to your assistant's private Telegram chat:
 | `Remind me in 20 minutes to take a break` | Saves a one-time reminder |
 | `Remind me every weekday at 8am to study` | Repeats Monday through Friday in your configured time zone |
 | `/reminders` (or `/tasks`) | Shows unfinished reminders |
+| `/agenda` | Shows today's and overdue reminders in your time zone, including notified tasks awaiting Done |
 | `/snooze 1 20` | Postpones reminder #1 by 20 minutes |
 | `/done 1` | Finishes reminder #1 and stops any repeats |
 | `/new` | Starts a fresh chat while keeping saved facts and reminders |
@@ -246,7 +252,11 @@ The [security review](SECURITY-REVIEW.md) explains the fixes, checks and remaini
   If it leaks, make a new one (command in `telegram-connector/README.md`).
 - Logins live only on your server (`data/`, `.env`, a Docker volume), readable only by root.
 - The call assistant talks only to your main account and can't send anything during calls.
-- **Disk space stays small.** Attachments are read in memory and never saved on the server.
+- **Large files use temporary disk space.** One transfer runs at a time, leaving at least
+  2048 MB free. Its private temporary file is removed after success, failure or cancellation.
+  Document/image extraction remains capped at 20 MB per file; larger files can still
+  be forwarded or saved to Telegram's Saved Messages. A hard process/host crash can leave
+  a temporary file behind; see the [transfer reference](telegram-connector/README.md#large-files).
   Saved call conversations are kept under `STORAGE_LIMIT_MB` (asked during setup, 1 GB by
   default, oldest deleted first), and Docker logs are capped at 30 MB per container.
 - Telegram's rules: this logs in as normal user accounts. Personal use is fine; heavy automated
@@ -261,6 +271,9 @@ python tests/test_caller.py         # needs ffmpeg; uses real Claude if `claude`
 python -m unittest discover -s tests -p 'test_chat.py'
 python -m unittest discover -s tests -p 'test_assistant_*.py'
 python -m unittest discover -s tests -p 'test_security.py'
+python -m unittest discover -s tests -p 'test_transfers.py'
+python tests/test_video.py
+python -m unittest discover -s tests -p 'test_video_chat.py'
 ```
 
 ## Credits

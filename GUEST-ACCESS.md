@@ -30,6 +30,12 @@ They cannot use your commands, saved facts, reminders, Telegram tools, conversat
 history or server files. Unknown accounts and group messages get no reply. A guest's
 first reply identifies the assistant as an AI and explains provider processing/storage.
 
+Video processing is owner-only. Guest videos, round videos, GIFs and video documents
+receive a short refusal without downloading, decoding, transcribing or starting Claude.
+This preserves the strict guest CPU/voice limits on the shared server. Voice-note bytes
+are now checked as they stream to a private temporary file, before transcription; their
+existing 20 MB / five-minute and daily limits remain unchanged.
+
 Your messages and calls preempt guest work. There is at most one guest request and one
 call at a time; busy requests are not queued. Guests may need to repeat an interrupted
 request. You can still use owner chat while on your own call, as before.

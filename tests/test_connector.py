@@ -4,13 +4,13 @@ Offline tests for the Telegram connector: a fake Telegram account, real file rea
     pip install -r telegram-connector/requirements.txt
     python tests/test_connector.py
 
-Needs internet only for the last check (downloading a public link).
+Set RUN_PUBLIC_DOWNLOAD=1 to also check a live public HTTPS download (enabled in CI).
 """
 import asyncio, io, os, sys, tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 os.environ["MCP_SECRET"] = "a" * 32
 os.environ["DATA_DIR"] = tempfile.gettempdir()
@@ -59,37 +59,39 @@ def xlsx_bytes():
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Money"; ws.append(["item", "cost"]); ws.append(["tea", 3])
     b = io.BytesIO(); wb.save(b); return b.getvalue()
 
-r = server.read_file(png_rgba(), "x.png", "image/png")
-check(r[0].to_image_content().mimeType == "image/jpeg", "PNG with transparency becomes JPEG")
-check(max(PILImage.open(io.BytesIO(r[0].data)).size) == 1568, "big picture shrunk to 1568px")
-r = server.read_file(pdf_text(), "a.pdf", "application/pdf")
-check("PDF with 3 pages" in r[0] and "Hello Telegram" in r[1] and "--- page 3 ---" in r[1], "text PDF read")
-big = pdf_text(pages=800)
-r = server.read_file(big, "big.pdf", "application/pdf")
-hint = [p for p in r if isinstance(p, str) and "start_page=" in p]
-check(hint, "long PDF says where to continue")
-nxt = int(hint[0].split("start_page=")[1].rstrip("."))
-check(f"--- page {nxt} ---" in server.read_file(big, "big.pdf", "application/pdf", nxt)[1], "start_page continues the PDF")
-r = server.read_file(pdf_scanned(), "scan.pdf", "application/pdf")
-check("scanned" in r[0] and sum(isinstance(p, server.Image) for p in r) == 5, "scanned PDF shown as 5 pictures")
-r = server.read_file(docx_bytes(), "w.docx", "application/vnd.openxmlformats")
-check("First paragraph" in r[0] and "A | B" in r[0], "Word file read with table")
-r = server.read_file(xlsx_bytes(), "s.xlsx", "")
-check("sheet: Money" in r[0] and "tea,3" in r[0], "Excel file read")
-check("یادداشت" in server.read_file("سلام، این یک یادداشت است".encode(), "n.txt", "text/plain")[0], "UTF-8 Persian text read")
-check("سلام" in server.read_file("سلام".encode("cp1256"), "old.txt", "text/plain")[0], "old Windows Persian text read")
-check(server.read_file(b"PK\x03\x04\x00\x00junk", "a.zip", "application/zip") is None, "zip refused")
-r = server.read_file(b"x" * 100_000, "big.log", "text/plain")
-check(len(r[0]) < 61_000 and "cut off" in r[0], "long text cut off")
+def check_files_and_times():
+    r = server.read_file(png_rgba(), "x.png", "image/png")
+    check(r[0].to_image_content().mimeType == "image/jpeg", "PNG with transparency becomes JPEG")
+    check(max(PILImage.open(io.BytesIO(r[0].data)).size) == 1568, "big picture shrunk to 1568px")
+    r = server.read_file(pdf_text(), "a.pdf", "application/pdf")
+    check("PDF with 3 pages" in r[0] and "Hello Telegram" in r[1] and "--- page 3 ---" in r[1], "text PDF read")
+    big = pdf_text(pages=800)
+    r = server.read_file(big, "big.pdf", "application/pdf")
+    hint = [p for p in r if isinstance(p, str) and "start_page=" in p]
+    check(hint, "long PDF says where to continue")
+    nxt = int(hint[0].split("start_page=")[1].rstrip("."))
+    check(f"--- page {nxt} ---" in server.read_file(big, "big.pdf", "application/pdf", nxt)[1], "start_page continues the PDF")
+    r = server.read_file(pdf_scanned(), "scan.pdf", "application/pdf")
+    check("scanned" in r[0] and sum(isinstance(p, server.Image) for p in r) == 5, "scanned PDF shown as 5 pictures")
+    r = server.read_file(docx_bytes(), "w.docx", "application/vnd.openxmlformats")
+    check("First paragraph" in r[0] and "A | B" in r[0], "Word file read with table")
+    r = server.read_file(xlsx_bytes(), "s.xlsx", "")
+    check("sheet: Money" in r[0] and "tea,3" in r[0], "Excel file read")
+    check("یادداشت" in server.read_file("سلام، این یک یادداشت است".encode(), "n.txt", "text/plain")[0], "UTF-8 Persian text read")
+    check("سلام" in server.read_file("سلام".encode("cp1256"), "old.txt", "text/plain")[0], "old Windows Persian text read")
+    check(server.read_file(b"PK\x03\x04\x00\x00junk", "a.zip", "application/zip") is None, "zip refused")
+    r = server.read_file(b"x" * 100_000, "big.log", "text/plain")
+    check(len(r[0]) < 61_000 and "cut off" in r[0], "long text cut off")
 
-# ---------- time helpers
-t = server._parse_time("2026-11-03 08:00")
-check(t.hour == 8 and str(t.tzinfo) == str(server.TZ), "times read as local time")
-check(server._parse_time("2026-11-03", end_of_day=True).day == 4, "bare 'until' date includes the whole day")
-try:
-    server._schedule_time("2020-01-01 10:00"); check(False, "past schedule refused")
-except ValueError as e:
-    check("not in the future" in str(e), "past schedule refused")
+    # ---------- time helpers
+    t = server._parse_time("2026-11-03 08:00")
+    check(t.hour == 8 and str(t.tzinfo) == str(server.TZ), "times read as local time")
+    check(server._parse_time("2026-11-03", end_of_day=True).day == 4, "bare 'until' date includes the whole day")
+    try:
+        server._schedule_time("2020-01-01 10:00"); check(False, "past schedule refused")
+    except ValueError as e:
+        check("not in the future" in str(e), "past schedule refused")
+
 
 # ---------- fake telegram
 NOW = datetime.now(timezone.utc)
@@ -109,6 +111,8 @@ class FakeClient:
         self.history = [msg(i, text=f"m{i}", date=NOW - timedelta(hours=300 - i)) for i in range(1, 301)]
         self.scheduled = [msg(900, text="good morning", date=NOW + timedelta(days=1))]
         self.premium = True
+    async def get_me(self):
+        return SimpleNamespace(premium=self.premium)
     async def __call__(self, req):
         self.calls.append(type(req).__name__)
         if isinstance(req, TranscribeAudioRequest):
@@ -137,6 +141,9 @@ class FakeClient:
             if limit is not None and n >= limit: return
             n += 1; yield m
     async def download_media(self, m, file=None, thumb=None):
+        if file is not None and file is not bytes:
+            file.write(m._data)
+            return file
         return m._data if thumb is None else (png_rgba(200, 200) if (m.video or m.video_note) else None)
     async def download_profile_photo(self, entity, file=None):
         return png_rgba(640, 640)
@@ -195,7 +202,8 @@ async def main():
     check("doc.pdf" in c[0].text and "Caption: see this" in c[0].text and "Hello Telegram" in c[2].text, "reads a PDF")
     c = await call("read_attachment", chat="me", message_id=2)
     check([x.type for x in c] == ["text", "image"], "returns a photo as a picture")
-    c = await call("read_attachment", chat="me", message_id=3)
+    with patch.object(server.video_tools, "available", return_value=False):
+        c = await call("read_attachment", chat="me", message_id=3)
     check(c[1].type == "image" and "preview picture" in c[0].text, "video gives its preview picture")
     c = await call("read_attachment", chat="me", message_id=4)
     check("can't open this kind" in c[0].text, "apk explained as unsupported")
@@ -209,7 +217,8 @@ async def main():
     check("سلام عزیزم" in c[0].text and "by Telegram" in c[0].text and fake.transcribe_polls == 2,
           "Persian voice message written out by Telegram (waits while pending)")
     fake.transcribe_polls = 0
-    c = await call("read_attachment", chat="me", message_id=9)
+    with patch.object(server.video_tools, "available", return_value=False):
+        c = await call("read_attachment", chat="me", message_id=9)
     check("سلام عزیزم" in c[0].text and c[1].type == "image", "round video: text plus preview picture")
     fake.premium = False
     c = await call("read_attachment", chat="me", message_id=8)
@@ -371,8 +380,21 @@ async def main():
     await call("update_server")
     check(fake.calls[-1] == ("send", "/update", None), "update_server asks the assistant to update")
 
-    data, name = await server._fetch_url("https://www.google.com/robots.txt")
-    check(name == "robots.txt" and b"User-agent" in data, "downloads a public link")
+    real_client = server.httpx.AsyncClient
+    def fixture_client(**kwargs):
+        transport = server.httpx.MockTransport(lambda request: server.httpx.Response(200, content=b"User-agent: *\n"))
+        return real_client(transport=transport, **kwargs)
+    with patch.object(server.httpx, "AsyncClient", fixture_client), \
+         patch.object(asyncio.get_running_loop(), "getaddrinfo", AsyncMock(return_value=[
+             (2, 1, 6, "", ("93.184.216.34", 443))])):
+        async with server._fetch_url("https://example.test/robots.txt") as item:
+            check(item.path.name == "robots.txt" and b"User-agent" in item.path.read_bytes(), "downloads a public-link fixture")
+    check(not item.path.exists(), "public download is cleaned up")
+    if os.environ.get("RUN_PUBLIC_DOWNLOAD") == "1":
+        async with server._fetch_url("https://www.google.com/robots.txt") as item:
+            check(b"User-agent" in item.path.read_bytes(), "live public HTTPS download")
 
-asyncio.run(main())
-print(f"\nALL {ok} CHECKS PASSED")
+if __name__ == "__main__":
+    check_files_and_times()
+    asyncio.run(main())
+    print(f"\nALL {ok} CHECKS PASSED")

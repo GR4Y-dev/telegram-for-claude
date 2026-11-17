@@ -1,4 +1,66 @@
-# Security review — 2026-11-03
+# Security review
+
+## November 17 follow-up: large files, video and call recovery
+
+Review scope: connector tools/downloads/parsers, caller commands and process handling,
+guest authorization/runtime, setup and updater paths, and their regression tests. No
+server, account or live call was accessed. The earlier review and its limits remain below.
+
+- Large transfers retain DNS validation of every address, checked-IP connections with
+  the original Host/TLS name, and redirect revalidation. Empty embedded credentials,
+  multicast addresses and unexpected HTTP content encoding are rejected too. Streaming
+  size checks, disk reserves and deadlines cover missing or misleading size metadata.
+- Temporary directories/files are private (0700/0600 on Linux), filenames are labels
+  rather than paths, and success/error/cancellation removes downloaded bytes. Oversized
+  image uploads bypass automatic photo decoding. Parser input and expansion limits stay
+  separate from the new transfer limit. A hard kill cannot run cleanup; operational
+  cleanup guidance is in the connector reference.
+- The shared hourly send quota now reserves capacity before awaiting Telegram or a
+  download. Concurrent sends could previously all pass the check and exceed the limit.
+  Failed/cancelled operations release reservations; completed sends retain their charge.
+- Provider error bodies and exception tracebacks could disclose private request details.
+  Changed error paths emit fixed diagnostic codes, exception types and counters only.
+  Regression tests use synthetic details to check these do not appear in logs/results.
+- Failed guest call streams are discarded so another turn cannot restart a container
+  under a retired cleanup identity. A cleanup failure continues to disable guest work.
+  Owner/guest scope, forwarded-command restrictions, quota enforcement and Docker
+  permissions remain in place. The update gate, shared lock and rollback remain unchanged.
+- Direct Python dependencies are pinned, including previously floating httpx, numpy and
+  tzdata. Claude Code stays at the reviewed 2.1.286 contract and py-tgcalls/ntgcalls remain
+  3.0.0/3.0.6. The connector adds distro FFmpeg/util-linux from its explicit Bookworm
+  image release; there is no new Python video dependency.
+- Video decoders use fixed argument lists, no shell, a local-file protocol whitelist,
+  and a demuxer whitelist excluding playlists and image sequences. MOV external data
+  references are disabled. Bounded output reads, image dimensions, source duration,
+  audio length, wall deadlines and Linux OS memory/CPU/file limits constrain hostile
+  media. Missing tools or a rejected decode produces a preview/explanation. These
+  restrictions reduce exposure; native codecs are still part of the trust boundary.
+- Owner chat passes bounded video frames through CLI image content blocks. Video
+  captions/audio never invoke deterministic commands and video turns deny self-directed
+  action tools. Guests cannot download or process videos. Voice-note byte limits now
+  apply during download for owners and guests, before data is read into memory.
+- The connector Docker context now includes the transfer/video helpers explicitly; its
+  deny-by-default context continues to exclude sessions, secrets and runtime data.
+- Written-file limits count UTF-8 bytes as well as characters, so multibyte text cannot
+  exceed the advertised input budget. TypeScript `.ts` files still use text extraction;
+  transport-stream videos need a video MIME type or Telegram video flag. Silent round
+  videos do not start a second download for transcription, and oversized videos retain
+  the forwarding/re-sending instructions.
+
+`test_transfers` covers simulated 2 GB HTTP and Telethon streams, bounded memory,
+cancellation during download/upload, deadlines, private temporary files, disk reserve,
+Premium caps, renamed attachments and metadata previews. `test_runtime` and `test_guests`
+cover safe stream recovery, protocol variants, process cleanup and diagnostic privacy.
+CI includes these tests plus the existing Linux updater and container-isolation checks.
+`test_video` and `test_video_chat` check decoder bounds, fallback, cancellation, disk
+cleanup, time ranges, playable upload attributes, document overrides and guest refusal.
+Tiny generated MP4/GIF and hostile-playlist tests run on CI and in the connector image.
+The pinned CLI integration test also checks image content blocks against a fake API.
+The public HTTPS smoke test is enabled in CI with `RUN_PUBLIC_DOWNLOAD=1`; local connector
+tests use a deterministic HTTP fixture. This revision does not claim a new vulnerability
+audit result until the CI dependency audit completes.
+
+## November 3 review
 
 This is a source and dependency review of this change, based on main commit
 `e6c1e6af56979ae1f1a6198e27622589db85b3be`. It is not a penetration test of the running
@@ -91,4 +153,3 @@ this assessment.
   Back up the assistant data directory with the service stopped before deployment.
 
 The running service keeps its current behavior until the change is merged and installed.
-

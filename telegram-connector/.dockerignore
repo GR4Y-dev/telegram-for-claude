@@ -2,4 +2,6 @@
 !Dockerfile
 !requirements.txt
 !server.py
+!transfers.py
+!video_tools.py
 !login.py

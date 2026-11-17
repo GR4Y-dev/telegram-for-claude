@@ -20,7 +20,7 @@ COMMAND_HELP = (
     "Memory: /remember <fact>, /memories, /forget <memory ID>\n"
     "Reminders: /remind in 20 minutes | Take a break\n"
     "Repeating: /remind weekdays 08:00 | Study\n"
-    "Manage: /reminders, /snooze <ID> <minutes>, /done <ID>\n"
+    "Manage: /agenda (today and overdue), /reminders, /snooze <ID> <minutes>, /done <ID>\n"
     "You can also write 'Remember that ...' or 'Remind me tomorrow at 8am to ...'."
 )
 WEEKDAYS = {name: i for i, name in enumerate(
@@ -151,9 +151,16 @@ def _handle(store, owner: int, text: str, tz: ZoneInfo, now: datetime) -> str | 
     if re.match(r"^(?:/forget|forget memory)(?:\s|$)", clean, re.I):
         return "Choose the memory ID from /memories, then send /forget <ID>."
 
-    if normalized in ("/reminders", "/tasks", "what are my reminders", "what are my tasks",
+    if normalized in ("/agenda", "/reminders", "/tasks", "what are my reminders", "what are my tasks",
                       "show my reminders", "show my tasks", "list my reminders", "list my tasks"):
         reminders = store.reminders(owner)
+        agenda = normalized == "/agenda"
+        if agenda:
+            today = now.astimezone(tz).date()
+            reminders = [r for r in reminders if r["next_due"] is None
+                         or datetime.fromtimestamp(r["next_due"], tz).date() <= today]
+            if not reminders:
+                return f"No reminders due today or overdue ({tz.key}). /reminders shows future ones."
         if not reminders:
             return "You have no unfinished reminders. Try: Remind me in 20 minutes to take a break."
         lines = []
@@ -163,7 +170,8 @@ def _handle(store, owner: int, text: str, tz: ZoneInfo, now: datetime) -> str | 
                     if due is not None else "already notified; awaiting Done")
             repeat = "" if r["repeat"] == "once" else f"; repeats {r['repeat']}"
             lines.append(f"#{r['id']}: {r['text']} — {when}{repeat}")
-        return "Your reminders:\n" + "\n".join(lines) + "\n/done <ID> finishes it (and stops repeats). /snooze <ID> <minutes> postpones it."
+        title = f"Today and overdue ({tz.key}):\n" if agenda else "Your reminders:\n"
+        return title + "\n".join(lines) + "\n/done <ID> finishes it (and stops repeats). /snooze <ID> <minutes> postpones it."
 
     done = re.fullmatch(r"(?:/done|done)\s+#?(\d+)", clean, re.I)
     if done:

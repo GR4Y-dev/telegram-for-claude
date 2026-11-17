@@ -29,12 +29,14 @@ class Client:
             self.actions.append((owner, "cancel"))
 
 
-def event(text="", *, sender=7, private=True, voice=False, size=50, duration=2):
+def event(text="", *, sender=7, private=True, voice=False, size=3, duration=2):
+    async def download(file):
+        file.write(b"ogg")
     return SimpleNamespace(
         sender_id=sender, is_private=private, raw_text=text, voice=voice,
         message=SimpleNamespace(document=SimpleNamespace(
             size=size, attributes=[SimpleNamespace(duration=duration)])),
-        reply=AsyncMock(), delete=AsyncMock(), download_media=AsyncMock(return_value=b"ogg"))
+        reply=AsyncMock(), delete=AsyncMock(), download_media=AsyncMock(side_effect=download))
 
 
 class ChatTests(unittest.IsolatedAsyncioTestCase):
@@ -112,8 +114,9 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_and_retry(self):
         self.think.side_effect = RuntimeError("secret provider detail")
         ev = event("hi")
-        with self.assertLogs("telegram-caller", level="ERROR"):
+        with self.assertLogs("telegram-caller", level="ERROR") as logs:
             await self.a.on_message(ev)
+        self.assertNotIn("secret provider detail", "\n".join(logs.output))
         self.assertNotIn("secret", ev.reply.await_args.args[0])
         self.assertEqual(self.a.chat_pending, 0)
         self.assertFalse(self.a.chat_lock.locked())
@@ -197,6 +200,21 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.a.store.memories(7)), 1)
         self.assertEqual(len(self.a.store.reminders(7)), 1)
         self.think.assert_not_awaited()
+
+    async def test_agenda_is_read_only_owner_only_and_forwarded_content_cannot_invoke_it(self):
+        self.due("Study today")
+        ev = event("/agenda")
+        await self.a.on_message(ev)
+        self.assertIn("Study today", ev.reply.await_args.args[0])
+        self.think.assert_not_awaited()
+        denied = event("/agenda", sender=8)
+        await self.a.on_message(denied)
+        denied.reply.assert_not_awaited()
+        forwarded = event("/agenda")
+        forwarded.fwd_from = object()
+        await self.a.on_message(forwarded)
+        self.assertIs(self.think.await_args.kwargs["actions"], False)
+        self.assertEqual(len(self.a.store.reminders(7)), 1)
 
     async def test_only_private_owner_can_change_saved_state(self):
         for text in ["/remember private fact", "Remind me in 20 minutes to study"]:
