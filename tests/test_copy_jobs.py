@@ -557,6 +557,20 @@ class CopyTests(unittest.IsolatedAsyncioTestCase):
         if os.name == "posix":
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    async def test_rate_ignores_time_before_a_resume(self):
+        self.source(message(1, "one"), message(2, "two"))
+        self.client.send_errors.append(RuntimeError("unexpected"))
+        job = await self.finish(await self.start())
+        self.assertEqual(job["status"], "failed")
+        self.clock.now += 3000  # the job sits failed for 50 minutes
+        await self.manager.control(job["job_id"], "resume")
+        self.clock.now += 60
+        await self.finish(job)
+        self.clock.now = job["sends"][-1][0] + 60
+        status = self.manager.status(job["job_id"])
+        # Two sends in the ~2 minutes since resume, not in the hour that includes the failure.
+        self.assertGreater(status["messages_per_hour"], 30)
+
     async def test_uploaded_media_accepted_by_real_telethon_conversion(self):
         await self.copy(message(1, data=b"pdf"), protected=True)
         media = self.client.calls[0][1]

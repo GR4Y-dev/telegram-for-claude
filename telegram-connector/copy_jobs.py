@@ -243,6 +243,8 @@ class CopyJobs:
             self._launch(active[0])
 
     def _launch(self, job):
+        # Rates count only time spent running since this launch, not time spent paused or failed.
+        job["stats"]["run_started_at"] = self.clock()
         self.tasks[job["job_id"]] = asyncio.create_task(self._run(job), name="copy-" + job["job_id"])
 
     def _check_idle(self, except_id=None):
@@ -360,8 +362,10 @@ class CopyJobs:
         if not job_id and not ordered:
             return {"jobs": []}
         job = self._get(job_id) if job_id else next((j for j in ordered if j["status"] in ACTIVE), ordered[0])
-        elapsed = max(1, min(3600, self.clock() - job["stats"]["started_at"]))
-        recent = [s for s in job["sends"] if s[0] > self.clock() - 3600]
+        stats = job["stats"]
+        since = max(stats["started_at"], stats.get("run_started_at") or 0, self.clock() - 3600)
+        elapsed = max(1, self.clock() - since)
+        recent = [s for s in job["sends"] if s[0] >= since]
         rate = len(recent) * 3600 / elapsed
         remaining = max(0, job["end_source_id"] - job["next_source_id"] + 1)
         entries = sorted(job["map"].items(), key=lambda p: int(p[0]))[-10:]
