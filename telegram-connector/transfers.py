@@ -86,6 +86,10 @@ class Transfer:
             self.timer.reschedule(self.started + timeout_seconds(self.size))
         return self
 
+    def tell(self):
+        # Telethon's progress_callback path reports f.tell() after every chunk.
+        return self.size
+
     def close(self):
         if self.stream:
             self.stream.close()
