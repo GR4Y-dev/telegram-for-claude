@@ -101,10 +101,11 @@ class FakeClient:
     async def download_media(self, msg, file, thumb=None, progress_callback=None):
         self.downloads.append((msg.id, thumb))
         data = msg._data if thumb is None else msg._thumb
-        if data:
-            file.write(data)
+        # Like Telethon's _download_file: write chunks, then report f.tell().
+        for start in range(0, len(data or b""), 4):
+            file.write(data[start:start + 4])
             if progress_callback:
-                progress_callback(len(data), len(data))
+                progress_callback(file.tell(), len(data))
         return file
 
     async def upload_file(self, file, *, file_size=None, file_name=None, progress_callback=None):
