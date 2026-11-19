@@ -191,13 +191,14 @@ class CopyTests(unittest.IsolatedAsyncioTestCase):
         self.notify = AsyncMock()
         self.video_upload = AsyncMock(side_effect=video_tools.VideoUnavailable("No decoder in this test."))
         self.limit = 2000 * MB
+        self.video_remux = AsyncMock(side_effect=video_tools.VideoError("No remux in this test."))
         self.get_client = AsyncMock(return_value=self.client)
         self.manager = self.make_manager()
 
     def make_manager(self, budget=60):
         manager = CopyJobs(self.tmp.name, get_client=self.get_client, resolve_chat=self.client.resolve,
             transfers=Transfers(0), upload_limit=AsyncMock(side_effect=lambda c: self.limit),
-            video_upload=self.video_upload, notify=self.notify, sends_per_hour=budget,
+            video_upload=self.video_upload, notify=self.notify, sends_per_hour=budget, video_remux=self.video_remux,
             clock=self.clock, sleep=self.clock.sleep)
         self.managers.append(manager)
         return manager
@@ -361,6 +362,54 @@ class CopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FilePartsInvalidError", job["pause_reason"])
         self.assertFalse(job["options"]["try_over_limit"])
         self.assertEqual((job["map"], job["skipped"], self.client.target_messages), ({}, [], []))
+
+    async def test_oversized_video_is_repackaged_as_mp4(self):
+        self.limit = 100
+
+        async def remux(path, out, cap):
+            self.assertEqual((Path(path).read_bytes(), cap), (b"v" * 105, 100))
+            Path(out).write_bytes(b"m" * 90)
+            return 90
+        self.video_remux.side_effect = remux
+        job = await self.copy(message(1, data=b"v" * 105, name="00000 (1).MTS", mime="video/mp2t"),
+                              message(2, "after"), protected=True)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(list(job["map"]), ["1", "2"])
+        media = self.client.calls[0][1]
+        self.assertEqual(self.client.upload_data[media.file.id], b"m" * 90)
+        self.assertEqual(media.file.name, "00000 (1).mp4")
+        self.assertEqual(media.mime_type, "video/mp4")
+        names = [a.file_name for a in media.attributes if isinstance(a, types.DocumentAttributeFilename)]
+        self.assertEqual(names, ["00000 (1).mp4"])
+
+    async def test_busy_video_lock_waits_without_downloading_again(self):
+        self.limit = 100
+        calls = []
+
+        async def remux(path, out, cap):
+            calls.append(path)
+            if len(calls) < 3:
+                raise video_tools.VideoBusy("busy")
+            Path(out).write_bytes(b"m" * 90)
+            return 90
+        self.video_remux.side_effect = remux
+        job = await self.copy(message(1, data=b"v" * 105, name="clip.MTS", mime="video/mp2t"), protected=True)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.client.downloads, [(1, None)])
+
+    async def test_repackage_that_does_not_fit_pauses_without_sending(self):
+        self.limit = 100
+        job = await self.copy(message(1, data=b"v" * 105, name="clip.MTS", mime="video/mp2t"), protected=True)
+        self.assertEqual((job["status"], job["paused_at_source_id"]), ("paused", 1))
+        self.assertIn("could not be repackaged", job["pause_reason"])
+        self.assertEqual((self.client.calls, job["skipped"]), ([], []))
+        self.video_remux.reset_mock()
+        job = await self.copy(message(3, data=b"v" * 120, name="far.MTS", mime="video/mp2t"), protected=True, first=3)
+        self.assertEqual((job["status"], job["paused_at_source_id"]), ("paused", 3))
+        self.assertIn("bigger than the", job["pause_reason"])
+        self.video_remux.assert_not_called()
+        self.assertEqual(self.client.downloads, [(1, None)])
 
     async def test_service_unsupported_empty_and_web_preview_skipped(self):
         service = types.MessageService(1, types.PeerChannel(1111), datetime.now(timezone.utc), action=types.MessageActionPinMessage())

@@ -23,9 +23,12 @@ MAX_AUDIO_SECONDS = 300
 MAX_AUDIO_BYTES = MAX_AUDIO_SECONDS * 16000 * 2 + 4096
 MAX_DURATION = 2 * 60 * 60
 JOB_SECONDS = 60
+# Repackaging copies the video stream (no decode); only time and output size grow with the file.
+REMUX_SECONDS = 30 * 60
 FORMATS = "mov,matroska,webm,avi,gif,mpeg,mpegts,ogg"
 # .ts is also TypeScript: transport streams need a video MIME type or Telegram flag.
-VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".gif", ".mpeg", ".mpg", ".ogv"}
+VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".gif", ".mpeg", ".mpg", ".ogv",
+              ".mts", ".m2ts"}
 _lock = asyncio.Lock()
 
 
@@ -98,21 +101,21 @@ async def job():
             raise VideoError("Video processing reached its time limit. Try a shorter time range or use the preview.") from None
 
 
-def _command(program, args):
+def _command(program, args, *, cpu=12, fsize=16 * MB):
     command = [program, "-hide_banner", "-loglevel", "error", "-max_alloc", str(64 * MB), *args]
     if os.name == "posix":
         # exec wrappers, not a shell or preexec_fn (the parent may have threads).
-        command = ["nice", "-n", "10", "prlimit", "--as=805306368", "--cpu=12",
-                   f"--fsize={16 * MB}", "--nofile=64", "--", *command]
+        command = ["nice", "-n", "10", "prlimit", "--as=805306368", f"--cpu={cpu}",
+                   f"--fsize={fsize}", "--nofile=64", "--", *command]
     return command
 
 
-async def _run(program, args, *, limit=64 * 1024):
+async def _run(program, args, *, limit=64 * 1024, seconds=15, cpu=12, fsize=16 * MB):
     proc = None
     try:
-        async with asyncio.timeout(15):
+        async with asyncio.timeout(seconds):
             proc = await asyncio.create_subprocess_exec(
-                *_command(program, args), stdin=asyncio.subprocess.DEVNULL,
+                *_command(program, args, cpu=cpu, fsize=fsize), stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 limit=64 * 1024,
                 **({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS}
@@ -161,6 +164,7 @@ class Info:
     audio: bool
     codec: str
     format: str
+    audio_codec: str = ""
 
     def describe(self):
         return f"Video: {self.duration:.1f} seconds, {self.width} × {self.height} pixels."
@@ -184,12 +188,39 @@ async def probe(path, *, max_duration=MAX_DURATION):
             raise VideoError("Video duration is unknown or exceeds the 2-hour processing limit. Send a shorter clip or send it as a file.")
         if min(width, height) <= 0 or width * height > 25_000_000:
             raise VideoError("Video dimensions exceed the 25-megapixel decode limit.")
-        return Info(duration, width, height, any(s.get("codec_type") == "audio" for s in streams),
-                    video.get("codec_name", ""), data.get("format", {}).get("format_name", ""))
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        return Info(duration, width, height, audio is not None,
+                    video.get("codec_name", ""), data.get("format", {}).get("format_name", ""),
+                    (audio or {}).get("codec_name", ""))
     except (KeyError, TypeError, StopIteration, json.JSONDecodeError, ValueError) as exc:
         if isinstance(exc, VideoError):
             raise
         raise VideoError("This file has no readable video metadata.") from None
+
+
+async def remux_mp4(path, out, max_bytes):
+    """Repackage an H.264 video as MP4 without re-encoding the picture; returns the new size.
+
+    Audio that is not AAC becomes AAC so every Telegram app can play it. The output is
+    capped at max_bytes by the OS limit on Linux and checked again here.
+    """
+    if not available():
+        raise VideoUnavailable("Video tools are unavailable.")
+    if _lock.locked():
+        raise VideoBusy("Video processing is busy. Try again when the other video finishes.")
+    async with _lock:
+        with _machine_slot():
+            info = await probe(path, max_duration=None)
+            if info.codec != "h264":
+                raise VideoError("Only H.264 video can be repackaged as MP4 without re-encoding.")
+            audio = ["-c:a", "copy"] if info.audio_codec == "aac" else ["-c:a", "aac", "-b:a", "192k"]
+            await _run("ffmpeg", [*_input(path), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *audio,
+                                  "-movflags", "+faststart", "-f", "mp4", "-y", str(Path(out).resolve())],
+                       seconds=REMUX_SECONDS, cpu=REMUX_SECONDS, fsize=int(max_bytes))
+    size = Path(out).stat().st_size
+    if size > max_bytes:
+        raise VideoError("The MP4 is still over the size limit.")
+    return size
 
 
 def time_range(info, start=0, end=None):

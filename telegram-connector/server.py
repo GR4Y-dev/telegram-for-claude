@@ -110,6 +110,7 @@ def _get_copy_jobs():
         _copy_jobs = CopyJobs(DATA_DIR, get_client=lambda: tg(), resolve_chat=lambda c, s: resolve_chat(c, s),
             transfers=_transfers, upload_limit=lambda c: _upload_limit(c, min(MAX_UPLOAD_MB, MAX_ATTACHMENT_MB)),
             video_upload=lambda p, f: _video_upload(p, f), notify=_copy_notice,
+            video_remux=lambda p, out, cap: video_tools.remux_mp4(p, out, cap),
             sends_per_hour=COPY_SENDS_PER_HOUR)
     return _copy_jobs
 
