@@ -20,7 +20,7 @@ from telethon import errors, utils
 from telethon.extensions import BinaryReader, html
 from telethon.tl import types
 
-from transfers import MB, Transfer, TransferError
+from transfers import MB, Transfer, TransferError, safe_name, timeout_seconds
 import video_tools
 
 log = logging.getLogger("telegram-copy-jobs")
@@ -29,6 +29,10 @@ ACTIVE = {"running", "waiting"}
 TRY_LIMIT = 4000 * MB
 # Telethon names known RPC errors by class (FilePartsInvalidError); unknown ones keep the raw code.
 REFUSED_SIZE = ("FilePart", "TooBig", "FILE_PART", "TOO_BIG")
+# Videos up to 10% over the limit are tried as an MP4 repackage (camera .MTS shrinks ~4-7%).
+REMUX_SLACK = 1.10
+# A busy video lock waits here (10 s x 60) instead of discarding a downloaded file.
+BUSY_TRIES = 60
 FLOODS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
 TRANSIENT = (ConnectionError, TimeoutError, errors.TimedOutError, errors.ServerError,
              errors.FileReferenceExpiredError, errors.FileReferenceInvalidError,
@@ -194,10 +198,12 @@ async def _can_post(client, target):
 
 class CopyJobs:
     def __init__(self, directory, *, get_client, resolve_chat, transfers, upload_limit,
-                 video_upload, notify=None, sends_per_hour=60, clock=time.time, sleep=asyncio.sleep):
+                 video_upload, notify=None, sends_per_hour=60, clock=time.time, sleep=asyncio.sleep,
+                 video_remux=None):
         self.directory = Path(directory) / "copy-jobs"
         self.get_client, self.resolve_chat = get_client, resolve_chat
         self.transfers, self.upload_limit, self.video_upload = transfers, upload_limit, video_upload
+        self.video_remux = video_remux
         self.notify, self.sends_per_hour = notify, max(1, int(sends_per_hour))
         self.clock, self.sleep = clock, sleep
         self.jobs, self.tasks = {}, {}
@@ -478,7 +484,7 @@ class CopyJobs:
                 self._skip(job, source_id, reason)
                 continue
             name, size, _ = _file_info(m)
-            if kind == "file" and size > limit:
+            if kind == "file" and size > limit and not self._remuxable(m, size, limit):
                 raise PauseCopy(source_id, f"Message {source_id} ({name or 'file'}, {size / MB:.1f} MB) "
                                 f"is bigger than the {limit // MB} MB this account can send.")
             text = _text(job, m)
@@ -509,6 +515,48 @@ class CopyJobs:
     async def _limit(self, job, client):
         limit = await self.upload_limit(client)
         return max(limit, TRY_LIMIT) if job["options"].get("try_over_limit") else limit
+
+    def _remuxable(self, message, size, limit):
+        return bool(self.video_remux) and video_tools.is_video(message) and size <= limit * REMUX_SLACK
+
+    async def _while_busy(self, call):
+        for _ in range(BUSY_TRIES):
+            try:
+                return await call()
+            except video_tools.VideoBusy:
+                await self.sleep(10)
+        return await call()
+
+    def _extend(self, item, size):
+        # Give the rest of the transfer (conversion and upload) a fresh deadline.
+        if item.timer is not None:
+            item.timer.reschedule(asyncio.get_running_loop().time() + timeout_seconds(size))
+
+    async def _remux(self, job, message, item, name, limit):
+        """Swap the downloaded file for an MP4 repackage under the limit, or pause."""
+        self._current(job, message.id, "converting", bytes_done=0, size=item.size)
+        out = item.folder / "repackaged.mp4"
+
+        async def remux():
+            self._extend(item, item.size)
+            return await self.video_remux(str(item.path), str(out), limit)
+        try:
+            item.check_disk(item.size)
+            size = await self._while_busy(remux)
+        except video_tools.VideoBusy:
+            out.unlink(missing_ok=True)
+            raise
+        except (video_tools.VideoError, TransferError, OSError):
+            out.unlink(missing_ok=True)
+            raise PauseCopy(message.id, f"Message {message.id} ({name or 'file'}, {item.size / MB:.1f} MB) is over the "
+                            f"{limit // MB} MB limit and could not be repackaged as an MP4 below it.") from None
+        new_name = Path(name or "video").stem + ".mp4"
+        target = item.folder / safe_name(new_name)
+        item.path.unlink()
+        os.replace(out, target)
+        item.path, item.size = target, size
+        self._extend(item, size)
+        return new_name
 
     def _record(self, job, item, target_id):
         item["target_id"] = target_id
@@ -582,16 +630,20 @@ class CopyJobs:
         name, size, attributes = _file_info(message)
         client = await self.get_client()
         limit = await self._limit(job, client)
-        if size > limit:
+        if size > limit and not self._remuxable(message, size, limit):
             raise PauseCopy(message.id, f"Message {message.id} ({name or 'file'}, {size / MB:.1f} MB) "
                             f"is bigger than the {limit // MB} MB this account can send.")
-        async with self.transfers.file(limit, size or None) as item:
+        async with self.transfers.file(max(limit, size), size or None) as item:
             self._current(job, message.id, "downloading", bytes_done=0, size=size)
             client = await self.get_client()
             await client.download_media(message, file=item,
                 progress_callback=self._progress(job, message.id, "downloading"))
             item.finish(name or ("photo.jpg" if getattr(message, "photo", None) else "file" + (message.file.ext or "")))
             attributes = list(attributes)
+            repackaged = item.size > limit
+            if repackaged:
+                name = await self._remux(job, message, item, name, limit)
+                attributes = [a for a in attributes if not isinstance(a, (types.DocumentAttributeFilename, types.DocumentAttributeVideo))]
             promote = (job["options"]["playable_videos"] and video_tools.is_video(message) and
                        not any(getattr(message, flag, None) for flag in ("video", "video_note", "gif", "sticker")))
             options = {}
@@ -600,7 +652,7 @@ class CopyJobs:
                 with tempfile.TemporaryDirectory(prefix="video-", dir=item.folder) as folder:
                     try:
                         item.check_disk(20_000)
-                        options = await self.video_upload(str(item.path), folder)
+                        options = await self._while_busy(lambda: self.video_upload(str(item.path), folder))
                         attributes = [a for a in attributes if not isinstance(a, types.DocumentAttributeVideo)] + options["attributes"]
                         generated_thumb = options.get("thumb")
                         if generated_thumb and Path(generated_thumb).stat().st_size < 200_000:
@@ -625,7 +677,7 @@ class CopyJobs:
             typed = any(isinstance(a, (types.DocumentAttributeVideo, types.DocumentAttributeAudio,
                                       types.DocumentAttributeSticker, types.DocumentAttributeAnimated)) for a in attributes)
             return types.InputMediaUploadedDocument(handle,
-                mime_type=options.get("mime_type") or message.file.mime_type or "application/octet-stream",
+                mime_type=options.get("mime_type") or ("video/mp4" if repackaged else message.file.mime_type) or "application/octet-stream",
                 attributes=attributes, thumb=thumb, force_file=not typed,
                 nosound_video=not bool(getattr(message, "gif", False)))
 
@@ -642,7 +694,7 @@ class CopyJobs:
             name, size, _ = _file_info(m)
             client = await self.get_client()
             limit = await self._limit(job, client)
-            if size > limit:
+            if size > limit and not self._remuxable(m, size, limit):
                 raise PauseCopy(m.id, f"Message {m.id} ({name or 'file'}, {size / MB:.1f} MB) "
                                 f"is bigger than the {limit // MB} MB this account can send.")
             item.update(file_name=name, size=size)

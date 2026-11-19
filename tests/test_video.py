@@ -337,6 +337,25 @@ class RealVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(audio)
         self.assertIn("No audio track", description)
 
+    async def test_camera_mts_repackages_to_streamable_mp4_under_the_cap(self):
+        # Like a camera .MTS: H.264 + AC-3 in 192-byte M2TS packets with a padded mux rate.
+        source, out = self.folder / "00000.MTS", self.folder / "out.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "4", "-threads", "1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-b:v", "2M",
+            "-c:a", "ac3", "-b:a", "256k", "-f", "mpegts", "-mpegts_m2ts_mode", "1", "-muxrate", "3M", str(source)],
+            check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        cap = source.stat().st_size
+        size = await video.remux_mp4(source, out, cap)
+        self.assertEqual(size, out.stat().st_size)
+        self.assertLess(size, cap)
+        async with video.job():
+            info = await video.probe(out)
+        self.assertTrue(info.streamable)
+        self.assertEqual(info.audio_codec, "aac")
+        with self.assertRaises(video.VideoError):
+            await video.remux_mp4(source, out, size // 2)
+
     async def test_playlists_and_corrupt_files_are_rejected(self):
         for content in (b"#EXTM3U\nhttp://127.0.0.1/private\n", b"ffconcat version 1.0\nfile '/etc/passwd'\n", b"not a movie"):
             path = self.folder / "hostile.mp4"
