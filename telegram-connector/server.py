@@ -709,7 +709,9 @@ async def control_copy(job_id: str, action: str, link_map: dict[str, int] | None
     """Control a background copy FROM THE USER'S OWN Telegram account.
     Show the job's source, target, range and action and get a clear yes first.
     action: pause, resume, skip_current (skip the paused message and resume),
-    cancel (keeps messages already sent), or add_links. link_map adds previously
+    cancel (keeps messages already sent), add_links, or try_over_limit (resume a paused
+    job and let Telegram accept or refuse files over the account's size limit, up to
+    4000 MB; a refusal pauses it again with Telegram's error). link_map adds previously
     copied source-id -> target-id pairs with any action. Resume reconciles any
     uncertain send against recent target history before continuing."""
     return await _get_copy_jobs().control(job_id, action, link_map)

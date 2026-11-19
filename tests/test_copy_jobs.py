@@ -338,6 +338,30 @@ class CopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(job["map"]), ["1", "4"])
         self.assertEqual(job["skipped"], [dict(source_id=2, reason="skipped by the user")])
 
+    async def test_try_over_limit_lets_telegram_accept_the_file(self):
+        self.limit = 10
+        self.source(message(1, data=b"a"), message(2, data=b"x" * 20), message(3, "after"), protected=True)
+        job = await self.finish(await self.start())
+        self.assertEqual((job["status"], job["paused_at_source_id"]), ("paused", 2))
+        await self.manager.control(job["job_id"], "try_over_limit")
+        await self.finish(job)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(list(job["map"]), ["1", "2", "3"])
+        self.assertEqual(self.client.upload_data[self.client.uploads[-1][0].id], b"x" * 20)
+        self.assertEqual(job["skipped"], [])
+
+    async def test_try_over_limit_refused_by_telegram_pauses_again(self):
+        self.limit = 10
+        self.source(message(1, data=b"x" * 20), message(2, "after"), protected=True)
+        job = await self.finish(await self.start())
+        self.client.upload_file = AsyncMock(side_effect=errors.FilePartsInvalidError(request=None))
+        await self.manager.control(job["job_id"], "try_over_limit")
+        await self.finish(job)
+        self.assertEqual((job["status"], job["paused_at_source_id"]), ("paused", 1))
+        self.assertIn("FilePartsInvalidError", job["pause_reason"])
+        self.assertFalse(job["options"]["try_over_limit"])
+        self.assertEqual((job["map"], job["skipped"], self.client.target_messages), ({}, [], []))
+
     async def test_service_unsupported_empty_and_web_preview_skipped(self):
         service = types.MessageService(1, types.PeerChannel(1111), datetime.now(timezone.utc), action=types.MessageActionPinMessage())
         job = await self.copy(service, message(2, media=types.MessageMediaUnsupported()), message(3),

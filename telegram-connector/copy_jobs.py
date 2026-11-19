@@ -25,6 +25,10 @@ import video_tools
 
 log = logging.getLogger("telegram-copy-jobs")
 ACTIVE = {"running", "waiting"}
+# Telegram's Premium upload cap; try_over_limit never attempts more than this.
+TRY_LIMIT = 4000 * MB
+# Telethon names known RPC errors by class (FilePartsInvalidError); unknown ones keep the raw code.
+REFUSED_SIZE = ("FilePart", "TooBig", "FILE_PART", "TOO_BIG")
 FLOODS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
 TRANSIENT = (ConnectionError, TimeoutError, errors.TimedOutError, errors.ServerError,
              errors.FileReferenceExpiredError, errors.FileReferenceInvalidError,
@@ -306,16 +310,21 @@ class CopyJobs:
 
     async def control(self, job_id, action, link_map=None):
         self.startup()
-        if action not in {"pause", "resume", "skip_current", "cancel", "add_links"}:
-            raise ValueError("Use pause, resume, skip_current, cancel or add_links.")
+        if action not in {"pause", "resume", "skip_current", "cancel", "add_links", "try_over_limit"}:
+            raise ValueError("Use pause, resume, skip_current, cancel, add_links or try_over_limit.")
         async with self.lock:
             job = self._get(job_id)
-            if action in {"resume", "skip_current"}:
+            if action in {"resume", "skip_current", "try_over_limit"}:
                 self._check_idle(job_id)
                 if job["status"] in {"done", "cancelled"}:
                     raise ValueError("That job is finished or cancelled. Start a new copy for another range.")
             if action == "skip_current" and (job["status"] != "paused" or not job["paused_at_source_id"]):
                 raise ValueError("Pause the job at the message you want to skip first.")
+            if action == "try_over_limit":
+                if job["status"] != "paused":
+                    raise ValueError("try_over_limit resumes a paused job; this one is not paused.")
+                # Let Telegram decide on files over the account limit; its refusal pauses again.
+                job["options"]["try_over_limit"] = True
             self._merge_links(job, link_map)
             if action in {"pause", "cancel", "skip_current"}:
                 if job["status"] in {"done", "cancelled"}:
@@ -331,7 +340,7 @@ class CopyJobs:
                     await asyncio.gather(task, return_exceptions=True)
             if action == "skip_current":
                 self._skip(job, job["paused_at_source_id"], "skipped by the user")
-            if action in {"resume", "skip_current"} and job["status"] not in ACTIVE:
+            if action in {"resume", "skip_current", "try_over_limit"} and job["status"] not in ACTIVE:
                 job.update(status="running", pause_reason=None, last_error=None,
                            paused_at_source_id=None, retry={})
                 # Keep a server-requested flood deadline even across manual resume.
@@ -456,7 +465,7 @@ class CopyJobs:
         messages = await client.get_messages(source, ids=ids)
         me = await client.get_me()
         caption_limit = 2048 if getattr(me, "premium", False) else 1024
-        limit = await self.upload_limit(client)
+        limit = await self._limit(job, client)
         items = []
         skipped = {s["source_id"] for s in job["skipped"]}
         for source_id, m in zip(ids, messages):
@@ -496,6 +505,10 @@ class CopyJobs:
                                   p["reply_source_id"] == items[0]["reply_source_id"] for p in items) and
                                   items[0]["reply_source_id"] not in ids)
         self._save(job)
+
+    async def _limit(self, job, client):
+        limit = await self.upload_limit(client)
+        return max(limit, TRY_LIMIT) if job["options"].get("try_over_limit") else limit
 
     def _record(self, job, item, target_id):
         item["target_id"] = target_id
@@ -568,7 +581,7 @@ class CopyJobs:
     async def _upload(self, job, message, pending_item):
         name, size, attributes = _file_info(message)
         client = await self.get_client()
-        limit = await self.upload_limit(client)
+        limit = await self._limit(job, client)
         if size > limit:
             raise PauseCopy(message.id, f"Message {message.id} ({name or 'file'}, {size / MB:.1f} MB) "
                             f"is bigger than the {limit // MB} MB this account can send.")
@@ -628,7 +641,7 @@ class CopyJobs:
         if item["kind"] == "file":
             name, size, _ = _file_info(m)
             client = await self.get_client()
-            limit = await self.upload_limit(client)
+            limit = await self._limit(job, client)
             if size > limit:
                 raise PauseCopy(m.id, f"Message {m.id} ({name or 'file'}, {size / MB:.1f} MB) "
                                 f"is bigger than the {limit // MB} MB this account can send.")
@@ -775,6 +788,13 @@ class CopyJobs:
                         else:
                             job.update(status="paused", pause_reason="The message still could not be copied after four retries.",
                                        paused_at_source_id=source_id)
+                    elif (isinstance(exc, errors.RPCError) and job["options"].get("try_over_limit")
+                          and any(k in f"{type(exc).__name__} {exc.message}" for k in REFUSED_SIZE)):
+                        job["options"]["try_over_limit"] = False
+                        reason = (f"Telegram refused message {source_id} over the size limit "
+                                  f"({type(exc).__name__}: {str(exc).split(' (caused')[0]}). "
+                                  "It stays paused; nothing was skipped.")
+                        job.update(status="paused", pause_reason=reason, last_error=reason, paused_at_source_id=source_id)
                     elif isinstance(exc, (errors.RPCError, TransferError, ValueError, OSError)):
                         reason = str(exc) if isinstance(exc, TransferError) else "Telegram could not copy this message. Check access, media and free disk space."
                         job.update(status="paused", pause_reason=reason, last_error=reason, paused_at_source_id=source_id)
