@@ -59,6 +59,16 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(video._exit("ffmpeg", 137), "ffmpeg stopped by signal 9: killed, often memory")
         self.assertEqual(video._exit("ffmpeg", 3221225477), "ffmpeg exit code 3221225477")
 
+    async def test_repackage_probe_accepts_a_camera_stream_without_duration(self):
+        raw = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080, "codec_name": "h264"},
+                           {"codec_type": "audio", "codec_name": "ac3"}],
+               "format": {"format_name": "mpegts"}}
+        with patch.object(video, "_run", AsyncMock(return_value=json.dumps(raw).encode())):
+            with self.assertRaisesRegex(video.VideoError, "duration is unknown"):
+                await video.probe("00015.MTS", max_duration=None)
+            info = await video.probe("00015.MTS", max_duration=None, need_duration=False)
+        self.assertEqual((info.duration, info.codec, info.audio_codec), (0.0, "h264", "ac3"))
+
     async def test_detection_includes_round_gif_and_video_documents(self):
         for m in (message(), message(video=False, video_note=True), message(video=False, gif=True),
                   message(video=False), message(video=False, file=SimpleNamespace(name="clip.mkv", mime_type="application/octet-stream"))):

@@ -185,7 +185,8 @@ class Info:
         return self.codec == "h264" and "mp4" in self.format.split(",")
 
 
-async def probe(path, *, max_duration=MAX_DURATION):
+async def probe(path, *, max_duration=MAX_DURATION, need_duration=True):
+    # need_duration=False reports an unreadable duration as 0 (camera MPEG-TS can lack one).
     raw = await _run("ffprobe", [*_input(path), "-show_entries",
         "format=duration,format_name:stream=codec_type,codec_name,width,height,duration",
         "-of", "json"])
@@ -195,7 +196,9 @@ async def probe(path, *, max_duration=MAX_DURATION):
         video = next(s for s in streams if s.get("codec_type") == "video")
         duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
         width, height = int(video["width"]), int(video["height"])
-        if not math.isfinite(duration) or duration <= 0 or (max_duration and duration > max_duration):
+        if not need_duration and not (math.isfinite(duration) and duration > 0):
+            duration = 0.0
+        elif not math.isfinite(duration) or duration <= 0 or (max_duration and duration > max_duration):
             raise VideoError("Video duration is unknown or exceeds the 2-hour processing limit. Send a shorter clip or send it as a file.")
         if min(width, height) <= 0 or width * height > 25_000_000:
             raise VideoError("Video dimensions exceed the 25-megapixel decode limit.")
@@ -221,7 +224,7 @@ async def remux_mp4(path, out, max_bytes):
         raise VideoBusy("Video processing is busy. Try again when the other video finishes.")
     async with _lock:
         with _machine_slot():
-            info = await probe(path, max_duration=None)
+            info = await probe(path, max_duration=None, need_duration=False)
             if info.codec != "h264":
                 raise VideoError("Only H.264 video can be repackaged as MP4 without re-encoding.")
             audio = ["-c:a", "copy"] if info.audio_codec == "aac" else ["-c:a", "aac", "-b:a", "192k"]
