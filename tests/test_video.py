@@ -53,6 +53,12 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_decoder_failures_name_the_exit_code_or_signal(self):
+        self.assertEqual(video._exit("ffmpeg", 1), "ffmpeg exit code 1")
+        self.assertEqual(video._exit("ffmpeg", -25), "ffmpeg stopped by signal 25: output size limit")
+        self.assertEqual(video._exit("ffmpeg", 137), "ffmpeg stopped by signal 9: killed, often memory")
+        self.assertEqual(video._exit("ffmpeg", 3221225477), "ffmpeg exit code 3221225477")
+
     async def test_detection_includes_round_gif_and_video_documents(self):
         for m in (message(), message(video=False, video_note=True), message(video=False, gif=True),
                   message(video=False), message(video=False, file=SimpleNamespace(name="clip.mkv", mime_type="application/octet-stream"))):

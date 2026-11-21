@@ -110,6 +110,17 @@ def _command(program, args, *, cpu=12, fsize=16 * MB):
     return command
 
 
+_SIGNALS = {24: "CPU time limit", 25: "output size limit", 9: "killed, often memory", 11: "crashed"}
+
+
+def _exit(program, code):
+    # On POSIX the wrappers exec ffmpeg, so a negative code is the signal that stopped it.
+    if code < 0 or 128 < code < 160:
+        sig = -code if code < 0 else code - 128
+        return f"{program} stopped by signal {sig}" + (f": {_SIGNALS[sig]}" if sig in _SIGNALS else "")
+    return f"{program} exit code {code}"
+
+
 async def _run(program, args, *, limit=64 * 1024, seconds=15, cpu=12, fsize=16 * MB):
     proc = None
     try:
@@ -125,8 +136,8 @@ async def _run(program, args, *, limit=64 * 1024, seconds=15, cpu=12, fsize=16 *
                 if len(output) + len(chunk) > limit:
                     raise VideoError("Video decoder output exceeded the safe limit.")
                 output.extend(chunk)
-            if await proc.wait() != 0:
-                raise VideoError("This video cannot be decoded within the safe limits.")
+            if (code := await proc.wait()) != 0:
+                raise VideoError(f"This video cannot be decoded within the safe limits ({_exit(program, code)}).")
             return bytes(output)
     except TimeoutError:
         raise VideoError("Video decoding took too long. Try a shorter clip.") from None

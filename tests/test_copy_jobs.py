@@ -403,6 +403,7 @@ class CopyTests(unittest.IsolatedAsyncioTestCase):
         job = await self.copy(message(1, data=b"v" * 105, name="clip.MTS", mime="video/mp2t"), protected=True)
         self.assertEqual((job["status"], job["paused_at_source_id"]), ("paused", 1))
         self.assertIn("could not be repackaged", job["pause_reason"])
+        self.assertIn("(reason: No remux in this test.)", job["pause_reason"])
         self.assertEqual((self.client.calls, job["skipped"]), ([], []))
         self.video_remux.reset_mock()
         job = await self.copy(message(3, data=b"v" * 120, name="far.MTS", mime="video/mp2t"), protected=True, first=3)

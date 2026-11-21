@@ -546,10 +546,15 @@ class CopyJobs:
         except video_tools.VideoBusy:
             out.unlink(missing_ok=True)
             raise
-        except (video_tools.VideoError, TransferError, OSError):
+        except (video_tools.VideoError, TransferError, OSError) as exc:
             out.unlink(missing_ok=True)
+            if isinstance(exc, OSError):
+                why = f"{type(exc).__name__}: {exc.strerror or exc}"
+            else:
+                why = str(exc) or type(exc).__name__
             raise PauseCopy(message.id, f"Message {message.id} ({name or 'file'}, {item.size / MB:.1f} MB) is over the "
-                            f"{limit // MB} MB limit and could not be repackaged as an MP4 below it.") from None
+                            f"{limit // MB} MB limit and could not be repackaged as an MP4 below it "
+                            f"(reason: {why[:200]}).") from None
         new_name = Path(name or "video").stem + ".mp4"
         target = item.folder / safe_name(new_name)
         item.path.unlink()
